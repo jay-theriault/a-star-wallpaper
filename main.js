@@ -107,6 +107,40 @@ function applyZoom(bounds, zoom) {
   };
 }
 
+function aspectFitBounds(bounds, w, h) {
+  // Adjust displayed bounds to match viewport aspect ratio so the map isn't stretched.
+  // Approximation: treat spans in degrees but correct lon scale by cos(latitude_of_center).
+  const c = bboxCenter(bounds);
+  const latSpan0 = bounds.north - bounds.south;
+  const lonSpan0 = bounds.east - bounds.west;
+
+  const viewportAspect = w / Math.max(1e-6, h);
+  const cosLat = Math.max(1e-6, Math.cos((c.lat * Math.PI) / 180));
+
+  // Effective lon-span in "lat degrees".
+  const effLonSpan0 = lonSpan0 * cosLat;
+  const effAspect0 = effLonSpan0 / Math.max(1e-6, latSpan0);
+
+  let latSpan = latSpan0;
+  let lonSpan = lonSpan0;
+
+  if (effAspect0 < viewportAspect) {
+    // Too "tall" / narrow; expand longitude span.
+    const effLonSpanTarget = latSpan0 * viewportAspect;
+    lonSpan = effLonSpanTarget / cosLat;
+  } else if (effAspect0 > viewportAspect) {
+    // Too "wide"; expand latitude span.
+    latSpan = effLonSpan0 / viewportAspect;
+  }
+
+  return {
+    north: c.lat + latSpan / 2,
+    south: c.lat - latSpan / 2,
+    west: c.lon - lonSpan / 2,
+    east: c.lon + lonSpan / 2,
+  };
+}
+
 function project(lat, lon, bounds, w, h) {
   // Simple equirect projection for prototype
   const x = (lon - bounds.west) / (bounds.east - bounds.west);
@@ -186,7 +220,9 @@ function pathLeavesBounds(pathKeys, bounds) {
 }
 
 // --- Simulation state ---
-let visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
+// Keep simulation bounds stable during a cycle; compute separate render bounds per-frame for aspect fit.
+let simBounds = applyZoom(BOUNDS, CONFIG.zoom);
+let renderBounds = simBounds;
 let startKey = null;
 let goalKey = null;
 let stepper = null;
@@ -198,14 +234,14 @@ let lastStepAt = 0;
 let cycle = 0;
 
 function pickEndpoints() {
-  visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
+  simBounds = applyZoom(BOUNDS, CONFIG.zoom);
 
   let s, g;
   for (let tries = 0; tries < 5000; tries++) {
-    s = randomCell(visibleBounds);
-    g = randomCell(visibleBounds);
-    const sLL = cellLatLon(...Object.values(parseKey(s)), visibleBounds);
-    const gLL = cellLatLon(...Object.values(parseKey(g)), visibleBounds);
+    s = randomCell(simBounds);
+    g = randomCell(simBounds);
+    const sLL = cellLatLon(...Object.values(parseKey(s)), simBounds);
+    const gLL = cellLatLon(...Object.values(parseKey(g)), simBounds);
     if (haversineMeters(sLL, gLL) >= CONFIG.minStartEndMeters) break;
   }
 
@@ -215,8 +251,8 @@ function pickEndpoints() {
     startKey,
     goalKey,
     neighbors: neighborsOf,
-    cost: (a, b) => cost(a, b, visibleBounds),
-    heuristic: (a, g2) => heuristic(a, g2, visibleBounds),
+    cost: (a, b) => cost(a, b, simBounds),
+    heuristic: (a, g2) => heuristic(a, g2, simBounds),
   });
 
   currentStep = null;
@@ -365,8 +401,8 @@ function buildBackground(bctx, w, h) {
 
 function cellToXY(k, w, h) {
   const { i, j } = parseKey(k);
-  const ll = cellLatLon(i, j, visibleBounds);
-  return project(ll.lat, ll.lon, visibleBounds, w, h);
+  const ll = cellLatLon(i, j, simBounds);
+  return project(ll.lat, ll.lon, renderBounds, w, h);
 }
 
 function norm01(v, lo, hi) {
@@ -549,6 +585,9 @@ function render(now) {
   const w = window.innerWidth;
   const h = window.innerHeight;
 
+  // Aspect-ratio aware framing for display (doesn't affect the simulation bounds).
+  renderBounds = aspectFitBounds(simBounds, w, h);
+
   // Static background.
   ctx.globalCompositeOperation = "source-over";
   ctx.globalAlpha = 1;
@@ -612,7 +651,7 @@ function tick(now) {
       if (r.done) {
         if (r.status === "found") {
           // optional bounds enforcement
-          if (CONFIG.discardIfPathLeavesBounds && pathLeavesBounds(r.path, visibleBounds)) {
+          if (CONFIG.discardIfPathLeavesBounds && pathLeavesBounds(r.path, simBounds)) {
             pickEndpoints();
             requestAnimationFrame(render);
             return;
