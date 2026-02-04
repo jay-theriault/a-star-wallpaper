@@ -3,46 +3,35 @@ import { haversineMeters, makeAStarStepper } from "./astar.js";
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
   north: 42.55,
-  south: 42.20,
+  south: 42.2,
   west: -71.35,
   east: -70.85,
 };
 
 const CONFIG = {
-  // target ~20 steps/sec
-  stepDelayMs: 50,
+  // target ~20 steps/sec (configurable)
+  stepsPerSecond: 20,
+  // hard safety: if exceeded, auto-resample
+  maxSearchSteps: 60_000,
+
   // hold after finding the path
   endHoldMs: 1800,
   endAnimMs: 1200,
+
   // grid density (prototype)
   gridCols: 160,
   gridRows: 100,
+
+  // endpoint sampling
   minStartEndMeters: 7000,
+  maxEndpointSampleTries: 8000,
+
   discardIfPathLeavesBounds: true,
   zoom: 1.0,
-  showHud: true,
 };
 
-// Allow simple runtime configuration via query string.
-// Examples:
-//   ?sps=30        -> ~30 A* steps/sec
-//   ?stepDelayMs=33
-//   ?zoom=1.2
-//   ?hud=0
-{
-  const qs = new URLSearchParams(globalThis.location?.search ?? "");
-
-  const sps = Number(qs.get("sps"));
-  if (Number.isFinite(sps) && sps > 0) CONFIG.stepDelayMs = Math.round(1000 / sps);
-
-  const stepDelayMs = Number(qs.get("stepDelayMs"));
-  if (Number.isFinite(stepDelayMs) && stepDelayMs >= 0) CONFIG.stepDelayMs = stepDelayMs;
-
-  const zoom = Number(qs.get("zoom"));
-  if (Number.isFinite(zoom) && zoom > 0) CONFIG.zoom = zoom;
-
-  const hud = qs.get("hud");
-  if (hud === "0" || hud === "false") CONFIG.showHud = false;
+function stepIntervalMs() {
+  return 1000 / Math.max(1, CONFIG.stepsPerSecond);
 }
 
 // --- Canvas setup ---
@@ -93,7 +82,12 @@ function project(lat, lon, bounds, w, h) {
 }
 
 function inBoundsLatLon(lat, lon, bounds) {
-  return lat <= bounds.north && lat >= bounds.south && lon >= bounds.west && lon <= bounds.east;
+  return (
+    lat <= bounds.north &&
+    lat >= bounds.south &&
+    lon >= bounds.west &&
+    lon <= bounds.east
+  );
 }
 
 // --- Grid graph (prototype) ---
@@ -106,10 +100,27 @@ function parseKey(k) {
   return { i, j };
 }
 
+function inGrid(i, j) {
+  return i >= 0 && j >= 0 && i < CONFIG.gridCols && j < CONFIG.gridRows;
+}
+
 function cellLatLon(i, j, bounds) {
-  const lat = bounds.north - (j + 0.5) * ((bounds.north - bounds.south) / CONFIG.gridRows);
-  const lon = bounds.west + (i + 0.5) * ((bounds.east - bounds.west) / CONFIG.gridCols);
+  const lat =
+    bounds.north -
+    (j + 0.5) * ((bounds.north - bounds.south) / CONFIG.gridRows);
+  const lon =
+    bounds.west +
+    (i + 0.5) * ((bounds.east - bounds.west) / CONFIG.gridCols);
   return { lat, lon };
+}
+
+function isValidNode(k, bounds) {
+  // Meaningful "discard if out of bounds" hook for later road graphs.
+  // For grid prototype this is redundant, but keeps the contract explicit.
+  const { i, j } = parseKey(k);
+  if (!inGrid(i, j)) return false;
+  const ll = cellLatLon(i, j, bounds);
+  return inBoundsLatLon(ll.lat, ll.lon, bounds);
 }
 
 function neighborsOf(k) {
@@ -127,21 +138,25 @@ function neighborsOf(k) {
   ]) {
     const ni = i + di;
     const nj = j + dj;
-    if (ni < 0 || nj < 0 || ni >= CONFIG.gridCols || nj >= CONFIG.gridRows) continue;
+    if (!inGrid(ni, nj)) continue;
     out.push(key(ni, nj));
   }
   return out;
 }
 
 function cost(aKey, bKey, bounds) {
-  const a = cellLatLon(...Object.values(parseKey(aKey)), bounds);
-  const b = cellLatLon(...Object.values(parseKey(bKey)), bounds);
+  const { i: ai, j: aj } = parseKey(aKey);
+  const { i: bi, j: bj } = parseKey(bKey);
+  const a = cellLatLon(ai, aj, bounds);
+  const b = cellLatLon(bi, bj, bounds);
   return haversineMeters(a, b);
 }
 
 function heuristic(aKey, goalKey, bounds) {
-  const a = cellLatLon(...Object.values(parseKey(aKey)), bounds);
-  const g = cellLatLon(...Object.values(parseKey(goalKey)), bounds);
+  const { i: ai, j: aj } = parseKey(aKey);
+  const { i: gi, j: gj } = parseKey(goalKey);
+  const a = cellLatLon(ai, aj, bounds);
+  const g = cellLatLon(gi, gj, bounds);
   return haversineMeters(a, g);
 }
 
@@ -149,6 +164,7 @@ function randomCell(bounds) {
   // uniform in grid for prototype
   const i = Math.floor(Math.random() * CONFIG.gridCols);
   const j = Math.floor(Math.random() * CONFIG.gridRows);
+  // cell centers should always be in bounds, but keep this defensive
   const ll = cellLatLon(i, j, bounds);
   if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return randomCell(bounds);
   return key(i, j);
@@ -156,11 +172,22 @@ function randomCell(bounds) {
 
 function pathLeavesBounds(pathKeys, bounds) {
   for (const k of pathKeys) {
-    const { i, j } = parseKey(k);
-    const ll = cellLatLon(i, j, bounds);
-    if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return true;
+    if (!isValidNode(k, bounds)) return true;
   }
   return false;
+}
+
+function sampleEndpoints(bounds) {
+  for (let tries = 0; tries < CONFIG.maxEndpointSampleTries; tries++) {
+    const s = randomCell(bounds);
+    const g = randomCell(bounds);
+    const { i: si, j: sj } = parseKey(s);
+    const { i: gi, j: gj } = parseKey(g);
+    const sLL = cellLatLon(si, sj, bounds);
+    const gLL = cellLatLon(gi, gj, bounds);
+    if (haversineMeters(sLL, gLL) >= CONFIG.minStartEndMeters) return { s, g };
+  }
+  return null;
 }
 
 // --- Simulation state ---
@@ -172,36 +199,40 @@ let currentStep = null;
 let finalPath = null;
 let phase = "search"; // search | end-hold | end-anim
 let phaseT = 0;
-let lastStepAt = 0;
 let cycle = 0;
+
+// Time-based stepping
+let lastNow = 0;
+let stepAccMs = 0;
 
 function pickEndpoints() {
   visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
 
-  let s, g;
-  for (let tries = 0; tries < 5000; tries++) {
-    s = randomCell(visibleBounds);
-    g = randomCell(visibleBounds);
-    const sLL = cellLatLon(...Object.values(parseKey(s)), visibleBounds);
-    const gLL = cellLatLon(...Object.values(parseKey(g)), visibleBounds);
-    if (haversineMeters(sLL, gLL) >= CONFIG.minStartEndMeters) break;
+  const ep = sampleEndpoints(visibleBounds);
+  if (!ep) {
+    // Should be extremely rare. If it happens, relax constraint rather than freezing.
+    startKey = randomCell(visibleBounds);
+    goalKey = randomCell(visibleBounds);
+  } else {
+    startKey = ep.s;
+    goalKey = ep.g;
   }
 
-  startKey = s;
-  goalKey = g;
   stepper = makeAStarStepper({
     startKey,
     goalKey,
     neighbors: neighborsOf,
     cost: (a, b) => cost(a, b, visibleBounds),
     heuristic: (a, g2) => heuristic(a, g2, visibleBounds),
+    isValidNode: (k) => isValidNode(k, visibleBounds),
+    maxSteps: CONFIG.maxSearchSteps,
   });
 
   currentStep = null;
   finalPath = null;
   phase = "search";
   phaseT = 0;
-  lastStepAt = performance.now();
+  stepAccMs = 0;
   cycle += 1;
 }
 
@@ -308,7 +339,14 @@ function render(now) {
     } else if (phase === "end-anim") {
       const t01 = clamp(phaseT / CONFIG.endAnimMs, 0, 1);
       // draw + pulse glow
-      drawPath(finalPath, w, h, 1.0, `rgba(34,211,238,${0.6 + 0.35 * Math.sin(t01 * Math.PI)})`, 6);
+      drawPath(
+        finalPath,
+        w,
+        h,
+        1.0,
+        `rgba(34,211,238,${0.6 + 0.35 * Math.sin(t01 * Math.PI)})`,
+        6
+      );
       drawPath(finalPath, w, h, 1.0, "rgba(34,211,238,0.95)", 3);
     }
   }
@@ -320,54 +358,75 @@ function render(now) {
   const closedN = currentStep?.closedSet?.size ?? 0;
   const steps = currentStep?.steps ?? 0;
 
-  if (CONFIG.showHud) {
-    hud.style.display = "block";
-    hud.innerHTML =
-      `<b>A*</b> Greater Boston (prototype grid) <span class="dim">cycle ${cycle}</span><br/>` +
-      `phase: <b>${phase}</b> · steps: <b>${steps}</b><br/>` +
-      `open: <b>${openN}</b> · closed: <b>${closedN}</b><br/>` +
-      `rate: ~<b>${Math.round(1000 / CONFIG.stepDelayMs)}</b> steps/sec`;
-  } else {
-    hud.style.display = "none";
-  }
+  hud.innerHTML =
+    `<b>A*</b> Greater Boston (prototype grid) <span class="dim">cycle ${cycle}</span><br/>` +
+    `phase: <b>${phase}</b> · steps: <b>${steps}</b><br/>` +
+    `open: <b>${openN}</b> · closed: <b>${closedN}</b><br/>` +
+    `rate target: ~<b>${CONFIG.stepsPerSecond}</b> steps/sec`;
 
   requestAnimationFrame(tick);
 }
 
-function tick(now) {
-  // step A* at fixed rate
-  if (phase === "search") {
-    if (now - lastStepAt >= CONFIG.stepDelayMs) {
-      lastStepAt = now;
-      const r = stepper.step();
-      currentStep = r;
+function advanceSearch(dtMs) {
+  // Time-based stepping: accumulate dt, then execute N steps.
+  stepAccMs += dtMs;
 
-      if (r.done) {
-        if (r.status === "found") {
-          // optional bounds enforcement
-          if (CONFIG.discardIfPathLeavesBounds && pathLeavesBounds(r.path, visibleBounds)) {
-            pickEndpoints();
-            requestAnimationFrame(render);
-            return;
-          }
+  const interval = stepIntervalMs();
+  // avoid spiral-of-death: cap steps per frame
+  const maxStepsThisFrame = 400;
+  let stepsThisFrame = 0;
 
-          finalPath = r.path;
-          phase = "end-hold";
-          phaseT = 0;
-        } else {
-          // no path — resample
+  while (stepAccMs >= interval && stepsThisFrame < maxStepsThisFrame) {
+    stepAccMs -= interval;
+    stepsThisFrame += 1;
+
+    const r = stepper.step();
+    currentStep = r;
+
+    if (r.done) {
+      if (r.status === "found") {
+        // optional bounds enforcement
+        if (
+          CONFIG.discardIfPathLeavesBounds &&
+          pathLeavesBounds(r.path, visibleBounds)
+        ) {
           pickEndpoints();
+          return;
         }
+
+        finalPath = r.path;
+        phase = "end-hold";
+        phaseT = 0;
+        return;
       }
+
+      // no path / invalid endpoints / max steps — resample
+      pickEndpoints();
+      return;
     }
+  }
+
+  // If we got stuck for some reason (shouldn't), force resample.
+  if (currentStep?.steps >= CONFIG.maxSearchSteps) {
+    pickEndpoints();
+  }
+}
+
+function tick(now) {
+  if (!lastNow) lastNow = now;
+  const dtMs = clamp(now - lastNow, 0, 100); // clamp to keep tab-switch spikes sane
+  lastNow = now;
+
+  if (phase === "search") {
+    advanceSearch(dtMs);
   } else if (phase === "end-hold") {
-    phaseT += 16.67;
+    phaseT += dtMs;
     if (phaseT >= CONFIG.endHoldMs) {
       phase = "end-anim";
       phaseT = 0;
     }
   } else if (phase === "end-anim") {
-    phaseT += 16.67;
+    phaseT += dtMs;
     if (phaseT >= CONFIG.endAnimMs) {
       pickEndpoints();
     }

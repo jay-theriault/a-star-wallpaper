@@ -30,9 +30,34 @@ export function makeAStarStepper({
   neighbors,
   cost,
   heuristic,
+  // Optional hooks (useful for road graphs later)
+  isValidNode,
+  maxSteps,
 }) {
-  // Open set stored as Map<key, fScore> + a simple array priority queue.
+  // Open set stored as Set + O(n) best-pick each step.
   // For this visual demo, simplicity > optimal perf.
+
+  const isValid = (k) => (typeof isValidNode === "function" ? !!isValidNode(k) : true);
+
+  // Fast-fail if start/goal invalid
+  if (!isValid(startKey) || !isValid(goalKey)) {
+    return {
+      step() {
+        return { done: true, status: "invalid-endpoints" };
+      },
+      getState() {
+        return {
+          openSet: new Set(),
+          closedSet: new Set(),
+          cameFrom: new Map(),
+          gScore: new Map(),
+          fScore: new Map(),
+          steps: 0,
+        };
+      },
+    };
+  }
+
   const openSet = new Set([startKey]);
   const closedSet = new Set();
   const cameFrom = new Map();
@@ -61,10 +86,16 @@ export function makeAStarStepper({
     step() {
       if (done) return { done: true, ...result };
 
+      if (Number.isFinite(maxSteps) && steps >= maxSteps) {
+        done = true;
+        result = { status: "max-steps", steps };
+        return { done: true, ...result };
+      }
+
       const current = lowestFInOpen();
       if (current == null) {
         done = true;
-        result = { status: "no-path" };
+        result = { status: "no-path", steps };
         return { done: true, ...result };
       }
 
@@ -82,6 +113,7 @@ export function makeAStarStepper({
       closedSet.add(current);
 
       for (const nb of neighbors(current)) {
+        if (!isValid(nb)) continue;
         if (closedSet.has(nb)) continue;
 
         const tentativeG = (gScore.get(current) ?? Infinity) + cost(current, nb);
