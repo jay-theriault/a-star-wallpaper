@@ -3,17 +3,32 @@ import { haversineMeters, makeAStarStepper } from "./astar.js";
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
   north: 42.55,
-  south: 42.2,
+  south: 42.20,
   west: -71.35,
   east: -70.85,
 };
 
-const CONFIG = {
-  // target ~20 steps/sec (configurable)
-  stepsPerSecond: 20,
-  // hard safety: if exceeded, auto-resample
-  maxSearchSteps: 60_000,
+const THEME = {
+  bg0: "#070a10",
+  bg1: "#0b1020",
+  grid: "rgba(255,255,255,0.035)",
+  road: "rgba(210,225,255,0.055)",
+  roadDash: "rgba(255,255,255,0.08)",
 
+  open: "#22d3ee", // cyan
+  closed: "#a78bfa", // violet
+  current: "#ffffff",
+
+  pathCore: "rgba(70, 245, 255, 0.96)",
+  pathGlow: "rgba(70, 245, 255, 0.42)",
+
+  start: "#34d399",
+  goal: "#fb7185",
+};
+
+const CONFIG = {
+  // target ~20 steps/sec
+  stepDelayMs: 50,
   // hold after finding the path
   endHoldMs: 1800,
   endAnimMs: 1200,
@@ -22,30 +37,48 @@ const CONFIG = {
   gridCols: 160,
   gridRows: 100,
 
-  // endpoint sampling
-  minStartEndMeters: 7000,
-  maxEndpointSampleTries: 8000,
+  // visuals
+  gridEvery: 8,
+  pointSizePx: 3.0,
+  pointSoftness: 0.9,
+  roadMajorCount: 8,
+  roadMinorCount: 14,
+  roadCurviness: 0.35,
+  noiseAlpha: 0.06,
+  vignetteAlpha: 0.42,
 
+  minStartEndMeters: 7000,
   discardIfPathLeavesBounds: true,
   zoom: 1.0,
 };
 
-function stepIntervalMs() {
-  return 1000 / Math.max(1, CONFIG.stepsPerSecond);
-}
-
 // --- Canvas setup ---
 const canvas = document.getElementById("c");
 const hud = document.getElementById("hud");
-const ctx = canvas.getContext("2d");
+const ctx = canvas.getContext("2d", { alpha: false });
+
+// Background layers cached into offscreen canvases (rebuilt on resize).
+const bg = document.createElement("canvas");
+const bgCtx = bg.getContext("2d", { alpha: false });
+const noise = document.createElement("canvas");
+const noiseCtx = noise.getContext("2d");
+
+let dpr = 1;
 
 function resize() {
-  const dpr = window.devicePixelRatio || 1;
+  dpr = window.devicePixelRatio || 1;
   canvas.width = Math.floor(window.innerWidth * dpr);
   canvas.height = Math.floor(window.innerHeight * dpr);
   canvas.style.width = window.innerWidth + "px";
   canvas.style.height = window.innerHeight + "px";
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Build background at CSS-pixel resolution (we draw it 1:1 each frame).
+  bg.width = Math.max(1, Math.floor(window.innerWidth));
+  bg.height = Math.max(1, Math.floor(window.innerHeight));
+  buildBackground(bgCtx, bg.width, bg.height);
+
+  buildNoise(noiseCtx);
 }
 window.addEventListener("resize", resize);
 resize();
@@ -82,12 +115,7 @@ function project(lat, lon, bounds, w, h) {
 }
 
 function inBoundsLatLon(lat, lon, bounds) {
-  return (
-    lat <= bounds.north &&
-    lat >= bounds.south &&
-    lon >= bounds.west &&
-    lon <= bounds.east
-  );
+  return lat <= bounds.north && lat >= bounds.south && lon >= bounds.west && lon <= bounds.east;
 }
 
 // --- Grid graph (prototype) ---
@@ -100,27 +128,10 @@ function parseKey(k) {
   return { i, j };
 }
 
-function inGrid(i, j) {
-  return i >= 0 && j >= 0 && i < CONFIG.gridCols && j < CONFIG.gridRows;
-}
-
 function cellLatLon(i, j, bounds) {
-  const lat =
-    bounds.north -
-    (j + 0.5) * ((bounds.north - bounds.south) / CONFIG.gridRows);
-  const lon =
-    bounds.west +
-    (i + 0.5) * ((bounds.east - bounds.west) / CONFIG.gridCols);
+  const lat = bounds.north - (j + 0.5) * ((bounds.north - bounds.south) / CONFIG.gridRows);
+  const lon = bounds.west + (i + 0.5) * ((bounds.east - bounds.west) / CONFIG.gridCols);
   return { lat, lon };
-}
-
-function isValidNode(k, bounds) {
-  // Meaningful "discard if out of bounds" hook for later road graphs.
-  // For grid prototype this is redundant, but keeps the contract explicit.
-  const { i, j } = parseKey(k);
-  if (!inGrid(i, j)) return false;
-  const ll = cellLatLon(i, j, bounds);
-  return inBoundsLatLon(ll.lat, ll.lon, bounds);
 }
 
 function neighborsOf(k) {
@@ -138,25 +149,21 @@ function neighborsOf(k) {
   ]) {
     const ni = i + di;
     const nj = j + dj;
-    if (!inGrid(ni, nj)) continue;
+    if (ni < 0 || nj < 0 || ni >= CONFIG.gridCols || nj >= CONFIG.gridRows) continue;
     out.push(key(ni, nj));
   }
   return out;
 }
 
 function cost(aKey, bKey, bounds) {
-  const { i: ai, j: aj } = parseKey(aKey);
-  const { i: bi, j: bj } = parseKey(bKey);
-  const a = cellLatLon(ai, aj, bounds);
-  const b = cellLatLon(bi, bj, bounds);
+  const a = cellLatLon(...Object.values(parseKey(aKey)), bounds);
+  const b = cellLatLon(...Object.values(parseKey(bKey)), bounds);
   return haversineMeters(a, b);
 }
 
 function heuristic(aKey, goalKey, bounds) {
-  const { i: ai, j: aj } = parseKey(aKey);
-  const { i: gi, j: gj } = parseKey(goalKey);
-  const a = cellLatLon(ai, aj, bounds);
-  const g = cellLatLon(gi, gj, bounds);
+  const a = cellLatLon(...Object.values(parseKey(aKey)), bounds);
+  const g = cellLatLon(...Object.values(parseKey(goalKey)), bounds);
   return haversineMeters(a, g);
 }
 
@@ -164,7 +171,6 @@ function randomCell(bounds) {
   // uniform in grid for prototype
   const i = Math.floor(Math.random() * CONFIG.gridCols);
   const j = Math.floor(Math.random() * CONFIG.gridRows);
-  // cell centers should always be in bounds, but keep this defensive
   const ll = cellLatLon(i, j, bounds);
   if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return randomCell(bounds);
   return key(i, j);
@@ -172,22 +178,11 @@ function randomCell(bounds) {
 
 function pathLeavesBounds(pathKeys, bounds) {
   for (const k of pathKeys) {
-    if (!isValidNode(k, bounds)) return true;
+    const { i, j } = parseKey(k);
+    const ll = cellLatLon(i, j, bounds);
+    if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return true;
   }
   return false;
-}
-
-function sampleEndpoints(bounds) {
-  for (let tries = 0; tries < CONFIG.maxEndpointSampleTries; tries++) {
-    const s = randomCell(bounds);
-    const g = randomCell(bounds);
-    const { i: si, j: sj } = parseKey(s);
-    const { i: gi, j: gj } = parseKey(g);
-    const sLL = cellLatLon(si, sj, bounds);
-    const gLL = cellLatLon(gi, gj, bounds);
-    if (haversineMeters(sLL, gLL) >= CONFIG.minStartEndMeters) return { s, g };
-  }
-  return null;
 }
 
 // --- Simulation state ---
@@ -199,74 +194,173 @@ let currentStep = null;
 let finalPath = null;
 let phase = "search"; // search | end-hold | end-anim
 let phaseT = 0;
+let lastStepAt = 0;
 let cycle = 0;
-
-// Time-based stepping
-let lastNow = 0;
-let stepAccMs = 0;
 
 function pickEndpoints() {
   visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
 
-  const ep = sampleEndpoints(visibleBounds);
-  if (!ep) {
-    // Should be extremely rare. If it happens, relax constraint rather than freezing.
-    startKey = randomCell(visibleBounds);
-    goalKey = randomCell(visibleBounds);
-  } else {
-    startKey = ep.s;
-    goalKey = ep.g;
+  let s, g;
+  for (let tries = 0; tries < 5000; tries++) {
+    s = randomCell(visibleBounds);
+    g = randomCell(visibleBounds);
+    const sLL = cellLatLon(...Object.values(parseKey(s)), visibleBounds);
+    const gLL = cellLatLon(...Object.values(parseKey(g)), visibleBounds);
+    if (haversineMeters(sLL, gLL) >= CONFIG.minStartEndMeters) break;
   }
 
+  startKey = s;
+  goalKey = g;
   stepper = makeAStarStepper({
     startKey,
     goalKey,
     neighbors: neighborsOf,
     cost: (a, b) => cost(a, b, visibleBounds),
     heuristic: (a, g2) => heuristic(a, g2, visibleBounds),
-    isValidNode: (k) => isValidNode(k, visibleBounds),
-    maxSteps: CONFIG.maxSearchSteps,
   });
 
   currentStep = null;
   finalPath = null;
   phase = "search";
   phaseT = 0;
-  stepAccMs = 0;
+  lastStepAt = performance.now();
   cycle += 1;
 }
 
 pickEndpoints();
 
 // --- Rendering ---
-function drawBackground(w, h) {
-  ctx.fillStyle = "#0b0f14";
-  ctx.fillRect(0, 0, w, h);
+function buildNoise(nctx) {
+  // Small tileable noise texture (repeated across screen).
+  const s = 128;
+  noise.width = s;
+  noise.height = s;
+  const img = nctx.createImageData(s, s);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = (Math.random() * 255) | 0;
+    img.data[i + 0] = v;
+    img.data[i + 1] = v;
+    img.data[i + 2] = v;
+    img.data[i + 3] = 255;
+  }
+  nctx.putImageData(img, 0, 0);
 }
 
-function drawGrid(w, h) {
-  // subtle grid / road texture
-  ctx.strokeStyle = "rgba(255,255,255,0.035)";
-  ctx.lineWidth = 1;
+function buildBackground(bctx, w, h) {
+  // Base gradient.
+  const g = bctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, THEME.bg1);
+  g.addColorStop(1, THEME.bg0);
+  bctx.fillStyle = g;
+  bctx.fillRect(0, 0, w, h);
+
+  // A few soft bloom blobs (gives depth behind the grid/roads).
+  bctx.save();
+  bctx.globalCompositeOperation = "screen";
+  for (let i = 0; i < 5; i++) {
+    const x = (0.15 + 0.7 * Math.random()) * w;
+    const y = (0.15 + 0.7 * Math.random()) * h;
+    const r = (0.22 + 0.25 * Math.random()) * Math.min(w, h);
+    const rg = bctx.createRadialGradient(x, y, 0, x, y, r);
+    rg.addColorStop(0, "rgba(56,189,248,0.07)");
+    rg.addColorStop(1, "rgba(56,189,248,0.0)");
+    bctx.fillStyle = rg;
+    bctx.beginPath();
+    bctx.arc(x, y, r, 0, Math.PI * 2);
+    bctx.fill();
+  }
+  bctx.restore();
+
+  // Road-like network: curvy arterials + lighter minor streets.
+  const drawRoad = ({ x0, y0, x1, y1, width, alpha, dash }) => {
+    const cx0 = x0 + (x1 - x0) * (0.30 + 0.10 * (Math.random() - 0.5));
+    const cy0 = y0 + (y1 - y0) * (0.30 + CONFIG.roadCurviness * (Math.random() - 0.5)) * 220;
+    const cx1 = x0 + (x1 - x0) * (0.70 + 0.10 * (Math.random() - 0.5));
+    const cy1 = y0 + (y1 - y0) * (0.70 + CONFIG.roadCurviness * (Math.random() - 0.5)) * 220;
+
+    bctx.save();
+    bctx.globalAlpha = alpha;
+    bctx.lineCap = "round";
+    bctx.lineJoin = "round";
+
+    // Asphalt body (soft).
+    bctx.strokeStyle = THEME.road;
+    bctx.lineWidth = width;
+    bctx.shadowColor = "rgba(0,0,0,0.45)";
+    bctx.shadowBlur = 10;
+    bctx.beginPath();
+    bctx.moveTo(x0, y0);
+    bctx.bezierCurveTo(cx0, cy0, cx1, cy1, x1, y1);
+    bctx.stroke();
+
+    if (dash) {
+      // Center dash.
+      bctx.shadowBlur = 0;
+      bctx.setLineDash([10, 12]);
+      bctx.lineDashOffset = Math.random() * 22;
+      bctx.strokeStyle = THEME.roadDash;
+      bctx.lineWidth = Math.max(1, width * 0.12);
+      bctx.beginPath();
+      bctx.moveTo(x0, y0);
+      bctx.bezierCurveTo(cx0, cy0, cx1, cy1, x1, y1);
+      bctx.stroke();
+    }
+    bctx.restore();
+  };
+
+  const randEdgePoint = () => {
+    const side = (Math.random() * 4) | 0;
+    if (side === 0) return { x: -30, y: Math.random() * h };
+    if (side === 1) return { x: w + 30, y: Math.random() * h };
+    if (side === 2) return { x: Math.random() * w, y: -30 };
+    return { x: Math.random() * w, y: h + 30 };
+  };
+
+  // Major roads.
+  for (let i = 0; i < CONFIG.roadMajorCount; i++) {
+    const a = randEdgePoint();
+    const b = randEdgePoint();
+    drawRoad({ x0: a.x, y0: a.y, x1: b.x, y1: b.y, width: 14 + 12 * Math.random(), alpha: 0.38, dash: true });
+  }
+
+  // Minor roads.
+  for (let i = 0; i < CONFIG.roadMinorCount; i++) {
+    const a = { x: Math.random() * w, y: Math.random() * h };
+    const b = randEdgePoint();
+    drawRoad({ x0: a.x, y0: a.y, x1: b.x, y1: b.y, width: 6 + 6 * Math.random(), alpha: 0.22, dash: false });
+  }
+
+  // Subtle grid on top.
+  bctx.save();
+  bctx.strokeStyle = THEME.grid;
+  bctx.lineWidth = 1;
   const stepX = w / CONFIG.gridCols;
   const stepY = h / CONFIG.gridRows;
-
-  // draw only every N lines for performance
-  const every = 8;
+  const every = CONFIG.gridEvery;
   for (let i = 0; i <= CONFIG.gridCols; i += every) {
     const x = i * stepX;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h);
-    ctx.stroke();
+    bctx.beginPath();
+    bctx.moveTo(x, 0);
+    bctx.lineTo(x, h);
+    bctx.stroke();
   }
   for (let j = 0; j <= CONFIG.gridRows; j += every) {
     const y = j * stepY;
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
-    ctx.stroke();
+    bctx.beginPath();
+    bctx.moveTo(0, y);
+    bctx.lineTo(w, y);
+    bctx.stroke();
   }
+  bctx.restore();
+
+  // Vignette.
+  bctx.save();
+  const vg = bctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.2, w / 2, h / 2, Math.max(w, h) * 0.75);
+  vg.addColorStop(0, "rgba(0,0,0,0.0)");
+  vg.addColorStop(1, `rgba(0,0,0,${CONFIG.vignetteAlpha})`);
+  bctx.fillStyle = vg;
+  bctx.fillRect(0, 0, w, h);
+  bctx.restore();
 }
 
 function cellToXY(k, w, h) {
@@ -275,158 +369,272 @@ function cellToXY(k, w, h) {
   return project(ll.lat, ll.lon, visibleBounds, w, h);
 }
 
-function drawSet(keys, w, h, color, alpha, sizePx) {
+function norm01(v, lo, hi) {
+  if (!Number.isFinite(v)) return 0;
+  if (hi <= lo) return 0;
+  return clamp((v - lo) / (hi - lo), 0, 1);
+}
+
+let scoreRange = { fLo: 0, fHi: 1, gLo: 0, gHi: 1 };
+function computeScoreRange(step) {
+  if (!step?.fScore || !step?.gScore) return;
+  let fLo = Infinity,
+    fHi = -Infinity,
+    gLo = Infinity,
+    gHi = -Infinity;
+
+  const visit = (k) => {
+    const f = step.fScore.get(k);
+    const g = step.gScore.get(k);
+    if (Number.isFinite(f)) {
+      fLo = Math.min(fLo, f);
+      fHi = Math.max(fHi, f);
+    }
+    if (Number.isFinite(g)) {
+      gLo = Math.min(gLo, g);
+      gHi = Math.max(gHi, g);
+    }
+  };
+
+  for (const k of step.openSet) visit(k);
+  for (const k of step.closedSet) visit(k);
+
+  if (!Number.isFinite(fLo)) fLo = 0;
+  if (!Number.isFinite(fHi)) fHi = 1;
+  if (!Number.isFinite(gLo)) gLo = 0;
+  if (!Number.isFinite(gHi)) gHi = 1;
+  scoreRange = { fLo, fHi, gLo, gHi };
+}
+
+function drawNodeDot(p, r, color, a) {
+  ctx.save();
+  ctx.globalAlpha = a;
   ctx.fillStyle = color;
-  ctx.globalAlpha = alpha;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawSet(step, keys, w, h, color, baseAlpha) {
+  // Draw with "soft" additive style for better readability.
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+
   for (const k of keys) {
     const p = cellToXY(k, w, h);
-    ctx.fillRect(p.x - sizePx / 2, p.y - sizePx / 2, sizePx, sizePx);
+    const f = step?.fScore?.get(k);
+    const t = 1 - norm01(f, scoreRange.fLo, scoreRange.fHi); // "better" nodes glow more
+
+    const a = baseAlpha * (0.45 + 0.75 * t);
+    const r = CONFIG.pointSizePx * (0.7 + 0.9 * t);
+
+    // Outer softness.
+    ctx.globalAlpha = a * (0.40 + CONFIG.pointSoftness * 0.35);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r * 1.7, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Core.
+    ctx.globalAlpha = a;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
   }
-  ctx.globalAlpha = 1;
+
+  ctx.restore();
 }
 
-function drawPath(pathKeys, w, h, t01, color, widthPx) {
-  if (!pathKeys || pathKeys.length < 2) return;
-  const n = Math.max(2, Math.floor(pathKeys.length * t01));
-  ctx.strokeStyle = color;
-  ctx.lineWidth = widthPx;
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
+function strokePath(keys, w, h, count) {
+  const n = Math.min(keys.length, Math.max(2, count));
   ctx.beginPath();
-  for (let idx = 0; idx < n; idx++) {
-    const p = cellToXY(pathKeys[idx], w, h);
-    if (idx === 0) ctx.moveTo(p.x, p.y);
+  for (let i = 0; i < n; i++) {
+    const p = cellToXY(keys[i], w, h);
+    if (i === 0) ctx.moveTo(p.x, p.y);
     else ctx.lineTo(p.x, p.y);
   }
-  ctx.stroke();
 }
 
-function drawMarker(k, w, h, fill, stroke) {
-  const p = cellToXY(k, w, h);
-  ctx.fillStyle = fill;
-  ctx.strokeStyle = stroke;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-  ctx.fill();
+function drawPath(keys, w, h, t01, glowPulse01 = 0) {
+  if (!keys || keys.length < 2) return;
+
+  const n = Math.max(2, Math.floor(keys.length * clamp(t01, 0, 1)));
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  // Big glow.
+  ctx.shadowColor = THEME.pathGlow;
+  ctx.shadowBlur = 22 + 18 * glowPulse01;
+  ctx.strokeStyle = THEME.pathGlow;
+  ctx.lineWidth = 11 + 6 * glowPulse01;
+  strokePath(keys, w, h, n);
   ctx.stroke();
+
+  // Mid glow.
+  ctx.shadowBlur = 12 + 10 * glowPulse01;
+  ctx.strokeStyle = "rgba(34, 211, 238, 0.20)";
+  ctx.lineWidth = 7 + 3 * glowPulse01;
+  strokePath(keys, w, h, n);
+  ctx.stroke();
+
+  // Core.
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = THEME.pathCore;
+  ctx.lineWidth = 2.75;
+  strokePath(keys, w, h, n);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawMarker(k, w, h, fill, ring) {
+  const p = cellToXY(k, w, h);
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+
+  // Glow ring.
+  ctx.strokeStyle = ring;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = ring;
+  ctx.shadowBlur = 14;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 8.5, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Core.
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = fill;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 5.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawCurrent(k, w, h, now) {
+  if (!k) return;
+  const p = cellToXY(k, w, h);
+  const t = (now % 900) / 900;
+  const pulse = 0.5 - 0.5 * Math.cos(t * Math.PI * 2);
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+
+  // Outer pulse.
+  ctx.globalAlpha = 0.20 + 0.28 * pulse;
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = 2;
+  ctx.shadowColor = "rgba(255,255,255,0.6)";
+  ctx.shadowBlur = 16;
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 10 + 8 * pulse, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Core.
+  ctx.globalAlpha = 0.9;
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 3.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
 }
 
 function render(now) {
   const w = window.innerWidth;
   const h = window.innerHeight;
 
-  drawBackground(w, h);
-  drawGrid(w, h);
+  // Static background.
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+  ctx.drawImage(bg, 0, 0, w, h);
+
+  // Film grain.
+  ctx.save();
+  ctx.globalAlpha = CONFIG.noiseAlpha;
+  ctx.globalCompositeOperation = "overlay";
+  ctx.fillStyle = ctx.createPattern(noise, "repeat");
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
 
   if (currentStep && currentStep.status === "searching") {
-    // closed = visited (purple-ish)
-    drawSet(currentStep.closedSet, w, h, "#7c3aed", 0.12, 3);
-    // open = frontier (cyan-ish)
-    drawSet(currentStep.openSet, w, h, "#22d3ee", 0.18, 3);
-
-    // current expansion
-    if (currentStep.current) {
-      const p = cellToXY(currentStep.current, w, h);
-      ctx.fillStyle = "rgba(255,255,255,0.85)";
-      ctx.fillRect(p.x - 3, p.y - 3, 6, 6);
-    }
+    drawSet(currentStep, currentStep.closedSet, w, h, THEME.closed, 0.07);
+    drawSet(currentStep, currentStep.openSet, w, h, THEME.open, 0.10);
+    drawCurrent(currentStep.current, w, h, now);
   }
 
   if (finalPath) {
     if (phase === "end-hold") {
-      drawPath(finalPath, w, h, 1.0, "rgba(34,211,238,0.95)", 4);
+      drawPath(finalPath, w, h, 1.0, 0.1);
     } else if (phase === "end-anim") {
       const t01 = clamp(phaseT / CONFIG.endAnimMs, 0, 1);
-      // draw + pulse glow
-      drawPath(
-        finalPath,
-        w,
-        h,
-        1.0,
-        `rgba(34,211,238,${0.6 + 0.35 * Math.sin(t01 * Math.PI)})`,
-        6
-      );
-      drawPath(finalPath, w, h, 1.0, "rgba(34,211,238,0.95)", 3);
+      const pulse = 0.5 - 0.5 * Math.cos(t01 * Math.PI * 2);
+      // Reveal + highlight head.
+      drawPath(finalPath, w, h, t01, pulse);
+      // subtle full path hint behind
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      drawPath(finalPath, w, h, 1.0, 0.0);
+      ctx.restore();
     }
   }
 
-  drawMarker(startKey, w, h, "#10b981", "rgba(16,185,129,0.8)");
-  drawMarker(goalKey, w, h, "#ef4444", "rgba(239,68,68,0.8)");
+  drawMarker(startKey, w, h, THEME.start, "rgba(52,211,153,0.55)");
+  drawMarker(goalKey, w, h, THEME.goal, "rgba(251,113,133,0.55)");
 
   const openN = currentStep?.openSet?.size ?? 0;
   const closedN = currentStep?.closedSet?.size ?? 0;
   const steps = currentStep?.steps ?? 0;
 
   hud.innerHTML =
-    `<b>A*</b> Greater Boston (prototype grid) <span class="dim">cycle ${cycle}</span><br/>` +
-    `phase: <b>${phase}</b> · steps: <b>${steps}</b><br/>` +
-    `open: <b>${openN}</b> · closed: <b>${closedN}</b><br/>` +
-    `rate target: ~<b>${CONFIG.stepsPerSecond}</b> steps/sec`;
+    `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
+    `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
+    `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b><br/>` +
+    `<span class="dim">rate</span>: ~<b>${Math.round(1000 / CONFIG.stepDelayMs)}</b> steps/sec`;
 
   requestAnimationFrame(tick);
 }
 
-function advanceSearch(dtMs) {
-  // Time-based stepping: accumulate dt, then execute N steps.
-  stepAccMs += dtMs;
-
-  const interval = stepIntervalMs();
-  // avoid spiral-of-death: cap steps per frame
-  const maxStepsThisFrame = 400;
-  let stepsThisFrame = 0;
-
-  while (stepAccMs >= interval && stepsThisFrame < maxStepsThisFrame) {
-    stepAccMs -= interval;
-    stepsThisFrame += 1;
-
-    const r = stepper.step();
-    currentStep = r;
-
-    if (r.done) {
-      if (r.status === "found") {
-        // optional bounds enforcement
-        if (
-          CONFIG.discardIfPathLeavesBounds &&
-          pathLeavesBounds(r.path, visibleBounds)
-        ) {
-          pickEndpoints();
-          return;
-        }
-
-        finalPath = r.path;
-        phase = "end-hold";
-        phaseT = 0;
-        return;
-      }
-
-      // no path / invalid endpoints / max steps — resample
-      pickEndpoints();
-      return;
-    }
-  }
-
-  // If we got stuck for some reason (shouldn't), force resample.
-  if (currentStep?.steps >= CONFIG.maxSearchSteps) {
-    pickEndpoints();
-  }
-}
-
 function tick(now) {
-  if (!lastNow) lastNow = now;
-  const dtMs = clamp(now - lastNow, 0, 100); // clamp to keep tab-switch spikes sane
-  lastNow = now;
-
+  // step A* at fixed rate
   if (phase === "search") {
-    advanceSearch(dtMs);
+    if (now - lastStepAt >= CONFIG.stepDelayMs) {
+      lastStepAt = now;
+      const r = stepper.step();
+      currentStep = r;
+      if (!r.done && r.status === "searching") computeScoreRange(r);
+
+      if (r.done) {
+        if (r.status === "found") {
+          // optional bounds enforcement
+          if (CONFIG.discardIfPathLeavesBounds && pathLeavesBounds(r.path, visibleBounds)) {
+            pickEndpoints();
+            requestAnimationFrame(render);
+            return;
+          }
+
+          finalPath = r.path;
+          phase = "end-hold";
+          phaseT = 0;
+        } else {
+          // no path — resample
+          pickEndpoints();
+        }
+      }
+    }
   } else if (phase === "end-hold") {
-    phaseT += dtMs;
+    phaseT += 16.67;
     if (phaseT >= CONFIG.endHoldMs) {
       phase = "end-anim";
       phaseT = 0;
     }
   } else if (phase === "end-anim") {
-    phaseT += dtMs;
+    phaseT += 16.67;
     if (phaseT >= CONFIG.endAnimMs) {
       pickEndpoints();
     }
