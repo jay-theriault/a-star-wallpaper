@@ -1,12 +1,5 @@
 import { haversineMeters, makeAStarStepper } from "./astar.js";
-
-// --- Spec-driven constants (initial proposal; tweak later) ---
-const BOUNDS = {
-  north: 42.55,
-  south: 42.20,
-  west: -71.35,
-  east: -70.85,
-};
+import { BOUNDS_PRESETS, DEFAULT_RUNTIME, bboxCenter, clamp, framedBounds, parseRuntimeConfig } from "./config.js";
 
 const THEME = {
   bg0: "#070a10",
@@ -26,12 +19,19 @@ const THEME = {
   goal: "#fb7185",
 };
 
+// --- Runtime config (query params) ---
+const { runtime: RUNTIME, warnings: runtimeWarnings } = parseRuntimeConfig(window.location.search, DEFAULT_RUNTIME);
+
+// Fixed center: Boston bbox center (even if we add more bounds presets later).
+const FIXED_CENTER = bboxCenter(BOUNDS_PRESETS.boston);
+
 const CONFIG = {
-  // target ~20 steps/sec
-  stepDelayMs: 50,
-  // hold after finding the path
-  endHoldMs: 1800,
-  endAnimMs: 1200,
+  // derived from runtime
+  stepDelayMs: Math.round(1000 / Math.max(1, RUNTIME.stepsPerSecond)),
+  endHoldMs: RUNTIME.endHoldMs,
+  endAnimMs: RUNTIME.endAnimMs,
+  minStartEndMeters: RUNTIME.minStartEndMeters,
+  zoom: RUNTIME.zoom,
 
   // grid density (prototype)
   gridCols: 160,
@@ -47,15 +47,28 @@ const CONFIG = {
   noiseAlpha: 0.06,
   vignetteAlpha: 0.42,
 
-  minStartEndMeters: 7000,
+  // behavior
   discardIfPathLeavesBounds: true,
-  zoom: 1.0,
+  endpointTries: RUNTIME.endpointTries,
 };
 
 // --- Canvas setup ---
 const canvas = document.getElementById("c");
 const hud = document.getElementById("hud");
 const ctx = canvas.getContext("2d", { alpha: false });
+
+// HUD + lightweight logging
+const hudLines = [];
+function hudLog(msg) {
+  const line = String(msg);
+  hudLines.unshift(line);
+  if (hudLines.length > 6) hudLines.length = 6;
+  // Also mirror to console for dev.
+  console.warn("[hud]", line);
+}
+
+if (!RUNTIME.hud) hud.style.display = "none";
+for (const w of runtimeWarnings) hudLog(w);
 
 // Background layers cached into offscreen canvases (rebuilt on resize).
 const bg = document.createElement("canvas");
@@ -79,32 +92,18 @@ function resize() {
   buildBackground(bgCtx, bg.width, bg.height);
 
   buildNoise(noiseCtx);
+
+  // Aspect-ratio-aware framing.
+  visibleBounds = computeVisibleBounds();
 }
 window.addEventListener("resize", resize);
 resize();
 
 // --- Coordinate helpers ---
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-function bboxCenter(bounds) {
-  return {
-    lat: (bounds.north + bounds.south) / 2,
-    lon: (bounds.east + bounds.west) / 2,
-  };
-}
-
-function applyZoom(bounds, zoom) {
-  const c = bboxCenter(bounds);
-  const latSpan = (bounds.north - bounds.south) / zoom;
-  const lonSpan = (bounds.east - bounds.west) / zoom;
-  return {
-    north: c.lat + latSpan / 2,
-    south: c.lat - latSpan / 2,
-    west: c.lon - lonSpan / 2,
-    east: c.lon + lonSpan / 2,
-  };
+function computeVisibleBounds() {
+  const base = BOUNDS_PRESETS[RUNTIME.bounds] ?? BOUNDS_PRESETS.boston;
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  return framedBounds({ baseBounds: base, center: FIXED_CENTER, zoom: CONFIG.zoom, aspect });
 }
 
 function project(lat, lon, bounds, w, h) {
@@ -186,7 +185,7 @@ function pathLeavesBounds(pathKeys, bounds) {
 }
 
 // --- Simulation state ---
-let visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
+let visibleBounds = computeVisibleBounds();
 let startKey = null;
 let goalKey = null;
 let stepper = null;
@@ -198,19 +197,37 @@ let lastStepAt = 0;
 let cycle = 0;
 
 function pickEndpoints() {
-  visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
+  visibleBounds = computeVisibleBounds();
 
-  let s, g;
-  for (let tries = 0; tries < 5000; tries++) {
-    s = randomCell(visibleBounds);
-    g = randomCell(visibleBounds);
+  let best = { s: null, g: null, d: -Infinity };
+  let satisfied = false;
+
+  for (let tries = 0; tries < CONFIG.endpointTries; tries++) {
+    const s = randomCell(visibleBounds);
+    const g = randomCell(visibleBounds);
     const sLL = cellLatLon(...Object.values(parseKey(s)), visibleBounds);
     const gLL = cellLatLon(...Object.values(parseKey(g)), visibleBounds);
-    if (haversineMeters(sLL, gLL) >= CONFIG.minStartEndMeters) break;
+    const d = haversineMeters(sLL, gLL);
+
+    if (d > best.d) best = { s, g, d };
+    if (d >= CONFIG.minStartEndMeters) {
+      best = { s, g, d };
+      satisfied = true;
+      break;
+    }
   }
 
-  startKey = s;
-  goalKey = g;
+  if (!satisfied) {
+    hudLog(
+      `minStartEndMeters not satisfied after ${CONFIG.endpointTries} tries (best: ${Math.round(best.d)}m < ${Math.round(
+        CONFIG.minStartEndMeters
+      )}m)`
+    );
+  }
+
+  startKey = best.s;
+  goalKey = best.g;
+
   stepper = makeAStarStepper({
     startKey,
     goalKey,
@@ -591,11 +608,18 @@ function render(now) {
   const closedN = currentStep?.closedSet?.size ?? 0;
   const steps = currentStep?.steps ?? 0;
 
-  hud.innerHTML =
-    `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
-    `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
-    `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b><br/>` +
-    `<span class="dim">rate</span>: ~<b>${Math.round(1000 / CONFIG.stepDelayMs)}</b> steps/sec`;
+  if (RUNTIME.hud) {
+    const linesHtml = hudLines.length
+      ? `<div class="dim" style="margin-top:6px">${hudLines.map((l) => `• ${l}`).join("<br/>")}</div>`
+      : "";
+
+    hud.innerHTML =
+      `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
+      `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
+      `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b><br/>` +
+      `<span class="dim">rate</span>: ~<b>${Math.round(1000 / CONFIG.stepDelayMs)}</b> steps/sec` +
+      linesHtml;
+  }
 
   requestAnimationFrame(tick);
 }

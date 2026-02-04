@@ -28,28 +28,41 @@ Some environments are stricter about loading ES modules from `file:///` URLs. If
 
 ---
 
-## Quick configuration (speed, zoom, HUD)
+## Quick configuration (runtime query params)
 
 You can tweak behavior either by editing constants in `main.js` or by using query-string parameters.
 
 ### Query-string parameters
 Append these to the URL you load in Lively:
 
-- `sps` — steps per second (approx)
-  - Example: `index.html?sps=30`
-- `stepDelayMs` — delay between A* steps (overrides `sps`)
-  - Example: `index.html?stepDelayMs=25`
-- `zoom` — zoom into the Boston bounding box (>1 zooms in)
+- `bounds` — optional bounds preset
+  - Currently supported: `boston`
+  - Example: `index.html?bounds=boston`
+- `zoom` — zoom into the bounding box (>1 zooms in)
+  - Valid range: clamped to `[0.25, 6]`
   - Example: `index.html?zoom=1.25`
+- `stepsPerSecond` — target A* steps per second
+  - Valid range: clamped to `[1, 240]`
+  - Example: `index.html?stepsPerSecond=30`
+- `endHoldMs` — how long to hold the completed path before the reveal animation
+  - Example: `index.html?endHoldMs=2500`
+- `endAnimMs` — how long to run the end reveal animation
+  - Example: `index.html?endAnimMs=1600`
+- `minStartEndMeters` — minimum start↔goal distance for sampling
+  - Example: `index.html?minStartEndMeters=9000`
 - `hud` — show/hide the debug HUD (`hud=0` hides)
   - Example: `index.html?hud=0`
 
 Examples:
-- `index.html?sps=35&zoom=1.2`
-- `http://127.0.0.1:8000/index.html?sps=25&hud=0`
+- `index.html?stepsPerSecond=35&zoom=1.2`
+- `http://127.0.0.1:8000/index.html?stepsPerSecond=25&hud=0`
+
+Notes:
+- All values are validated/clamped; invalid values fall back to defaults.
+- If endpoint sampling can’t satisfy `minStartEndMeters` after N tries, a warning is shown in the HUD and it proceeds with the best pair found.
 
 ### Edit constants
-Open `main.js` and adjust the `CONFIG` object (e.g. `stepDelayMs`, `zoom`, `gridCols`, `gridRows`).
+Open `main.js` and adjust the `CONFIG` object (e.g. `gridCols`, `gridRows`, styling). Runtime values above are applied first.
 
 ---
 
@@ -73,4 +86,5 @@ python -m http.server 8000
 
 ## Notes / roadmap
 - Current graph is a **regular grid** (prototype).
+- Displayed bounds are framed to the **screen aspect ratio** while keeping a fixed center (Boston bbox center).
 - Road-network / OSM integration is a later step.
