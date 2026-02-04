@@ -20,7 +20,30 @@ const CONFIG = {
   minStartEndMeters: 7000,
   discardIfPathLeavesBounds: true,
   zoom: 1.0,
+  showHud: true,
 };
+
+// Allow simple runtime configuration via query string.
+// Examples:
+//   ?sps=30        -> ~30 A* steps/sec
+//   ?stepDelayMs=33
+//   ?zoom=1.2
+//   ?hud=0
+{
+  const qs = new URLSearchParams(globalThis.location?.search ?? "");
+
+  const sps = Number(qs.get("sps"));
+  if (Number.isFinite(sps) && sps > 0) CONFIG.stepDelayMs = Math.round(1000 / sps);
+
+  const stepDelayMs = Number(qs.get("stepDelayMs"));
+  if (Number.isFinite(stepDelayMs) && stepDelayMs >= 0) CONFIG.stepDelayMs = stepDelayMs;
+
+  const zoom = Number(qs.get("zoom"));
+  if (Number.isFinite(zoom) && zoom > 0) CONFIG.zoom = zoom;
+
+  const hud = qs.get("hud");
+  if (hud === "0" || hud === "false") CONFIG.showHud = false;
+}
 
 // --- Canvas setup ---
 const canvas = document.getElementById("c");
@@ -297,11 +320,16 @@ function render(now) {
   const closedN = currentStep?.closedSet?.size ?? 0;
   const steps = currentStep?.steps ?? 0;
 
-  hud.innerHTML =
-    `<b>A*</b> Greater Boston (prototype grid) <span class="dim">cycle ${cycle}</span><br/>` +
-    `phase: <b>${phase}</b> · steps: <b>${steps}</b><br/>` +
-    `open: <b>${openN}</b> · closed: <b>${closedN}</b><br/>` +
-    `rate: ~<b>${Math.round(1000 / CONFIG.stepDelayMs)}</b> steps/sec`;
+  if (CONFIG.showHud) {
+    hud.style.display = "block";
+    hud.innerHTML =
+      `<b>A*</b> Greater Boston (prototype grid) <span class="dim">cycle ${cycle}</span><br/>` +
+      `phase: <b>${phase}</b> · steps: <b>${steps}</b><br/>` +
+      `open: <b>${openN}</b> · closed: <b>${closedN}</b><br/>` +
+      `rate: ~<b>${Math.round(1000 / CONFIG.stepDelayMs)}</b> steps/sec`;
+  } else {
+    hud.style.display = "none";
+  }
 
   requestAnimationFrame(tick);
 }
