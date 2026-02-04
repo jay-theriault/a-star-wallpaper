@@ -52,7 +52,44 @@ const CONFIG = {
   zoom: 1.0,
 };
 
+// --- Endpoint sampling ---
+export const ENDPOINT_SAMPLING_MAX_TRIES = 5000;
+
+/**
+ * Attempt to sample endpoints that satisfy `minMeters` for up to `maxTries`.
+ * If not possible, returns the best-effort (max-distance) pair found.
+ *
+ * Pure/testable: pass in `randomKey`, `toLatLon`, and optionally `rng`.
+ */
+export function sampleEndpointPair({
+  randomKey,
+  toLatLon,
+  minMeters,
+  maxTries = ENDPOINT_SAMPLING_MAX_TRIES,
+  rng = Math.random,
+  distanceFn = haversineMeters,
+}) {
+  let best = { startKey: null, goalKey: null, distanceMeters: -Infinity, minDistanceMet: false, tries: 0 };
+
+  for (let tries = 0; tries < maxTries; tries++) {
+    const startKey = randomKey(rng);
+    const goalKey = randomKey(rng);
+    const sLL = toLatLon(startKey);
+    const gLL = toLatLon(goalKey);
+    const d = distanceFn(sLL, gLL);
+
+    if (d > best.distanceMeters) best = { startKey, goalKey, distanceMeters: d, minDistanceMet: d >= minMeters, tries: tries + 1 };
+
+    if (d >= minMeters) {
+      return { startKey, goalKey, distanceMeters: d, minDistanceMet: true, tries: tries + 1 };
+    }
+  }
+
+  return best;
+}
+
 // --- Canvas setup ---
+if (typeof window !== "undefined") {
 const canvas = document.getElementById("c");
 const hud = document.getElementById("hud");
 const ctx = canvas.getContext("2d", { alpha: false });
@@ -167,12 +204,12 @@ function heuristic(aKey, goalKey, bounds) {
   return haversineMeters(a, g);
 }
 
-function randomCell(bounds) {
+function randomCell(bounds, rng = Math.random) {
   // uniform in grid for prototype
-  const i = Math.floor(Math.random() * CONFIG.gridCols);
-  const j = Math.floor(Math.random() * CONFIG.gridRows);
+  const i = Math.floor(rng() * CONFIG.gridCols);
+  const j = Math.floor(rng() * CONFIG.gridRows);
   const ll = cellLatLon(i, j, bounds);
-  if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return randomCell(bounds);
+  if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return randomCell(bounds, rng);
   return key(i, j);
 }
 
@@ -196,21 +233,26 @@ let phase = "search"; // search | end-hold | end-anim
 let phaseT = 0;
 let lastStepAt = 0;
 let cycle = 0;
+let endpointSamplingBestEffort = false;
+let endpointSamplingDistanceMeters = 0;
+let endpointSamplingTries = 0;
 
 function pickEndpoints() {
   visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
 
-  let s, g;
-  for (let tries = 0; tries < 5000; tries++) {
-    s = randomCell(visibleBounds);
-    g = randomCell(visibleBounds);
-    const sLL = cellLatLon(...Object.values(parseKey(s)), visibleBounds);
-    const gLL = cellLatLon(...Object.values(parseKey(g)), visibleBounds);
-    if (haversineMeters(sLL, gLL) >= CONFIG.minStartEndMeters) break;
-  }
+  const sampled = sampleEndpointPair({
+    maxTries: ENDPOINT_SAMPLING_MAX_TRIES,
+    minMeters: CONFIG.minStartEndMeters,
+    randomKey: (rng) => randomCell(visibleBounds, rng),
+    toLatLon: (k) => cellLatLon(...Object.values(parseKey(k)), visibleBounds),
+  });
 
-  startKey = s;
-  goalKey = g;
+  startKey = sampled.startKey;
+  goalKey = sampled.goalKey;
+  endpointSamplingBestEffort = !sampled.minDistanceMet;
+  endpointSamplingDistanceMeters = sampled.distanceMeters;
+  endpointSamplingTries = sampled.tries;
+
   stepper = makeAStarStepper({
     startKey,
     goalKey,
@@ -591,9 +633,14 @@ function render(now) {
   const closedN = currentStep?.closedSet?.size ?? 0;
   const steps = currentStep?.steps ?? 0;
 
+  const samplingLine =
+    `sample: <b>${Math.round(endpointSamplingDistanceMeters)}</b>m <span class="dim">·</span> tries: <b>${endpointSamplingTries}</b>` +
+    (endpointSamplingBestEffort ? ` <span class="dim">·</span> <b style="color:#fb7185">min-distance not met; best-effort</b>` : "");
+
   hud.innerHTML =
     `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
     `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
+    `${samplingLine}<br/>` +
     `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b><br/>` +
     `<span class="dim">rate</span>: ~<b>${Math.round(1000 / CONFIG.stepDelayMs)}</b> steps/sec`;
 
@@ -644,3 +691,4 @@ function tick(now) {
 }
 
 requestAnimationFrame(tick);
+}
