@@ -28,28 +28,32 @@ Some environments are stricter about loading ES modules from `file:///` URLs. If
 
 ---
 
-## Quick configuration (speed, zoom, HUD)
+## Configuration (query params)
 
-You can tweak behavior either by editing constants in `main.js` or by using query-string parameters.
+You can tweak runtime behavior by adding query-string parameters to the URL you load in Lively.
 
-### Query-string parameters
-Append these to the URL you load in Lively:
+All params are **optional**. Out-of-range values are **clamped**; non-numeric/invalid values **fall back to defaults** (no errors).
 
-- `sps` — steps per second (approx)
-  - Example: `index.html?sps=30`
-- `stepDelayMs` — delay between A* steps (overrides `sps`)
-  - Example: `index.html?stepDelayMs=25`
-- `zoom` — zoom into the Boston bounding box (>1 zooms in)
-  - Example: `index.html?zoom=1.25`
-- `hud` — show/hide the debug HUD (`hud=0` hides)
-  - Example: `index.html?hud=0`
+### Supported params
+- `sps` (steps per second): integer **[1, 120]** (default **20**)
+- `zoom`: float **[0.5, 2.0]** (default **1.0**)
+- `hud`: **0|1** (default **1**)
+- `endHoldMs`: int **[0, 60000]** (default: whatever `main.js` ships with)
+- `endAnimMs`: int **[0, 60000]** (default: whatever `main.js` ships with)
+- `minStartEndMeters`: int **[0, 200000]** (default: whatever `main.js` ships with)
 
-Examples:
-- `index.html?sps=35&zoom=1.2`
-- `http://127.0.0.1:8000/index.html?sps=25&hud=0`
+### Examples
+1) Faster search, zoomed in:
+- `index.html?zoom=1.2&sps=30`
 
-### Edit constants
-Open `main.js` and adjust the `CONFIG` object (e.g. `stepDelayMs`, `zoom`, `gridCols`, `gridRows`).
+2) Hide the HUD (good for “clean” wallpaper mode):
+- `index.html?zoom=1.2&sps=30&hud=0`
+
+3) Longer end hold + minimum start/end distance:
+- `index.html?endHoldMs=5000&endAnimMs=1500&minStartEndMeters=12000`
+
+### Edit defaults
+Open `main.js` and adjust `DEFAULT_CONFIG` (or other constants) to change the shipped defaults.
 
 ---
 

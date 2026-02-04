@@ -26,9 +26,19 @@ const THEME = {
   goal: "#fb7185",
 };
 
-const CONFIG = {
-  // target ~20 steps/sec
-  stepDelayMs: 50,
+// --- Runtime configuration (query params) ---
+//
+// Supported query params (invalid values fall back to defaults):
+//   - sps: integer [1, 120] (steps per second)
+//   - zoom: float [0.5, 2.0]
+//   - hud: 0|1
+//   - endHoldMs: int [0, 60000]
+//   - endAnimMs: int [0, 60000]
+//   - minStartEndMeters: int [0, 200000]
+
+const DEFAULT_CONFIG = {
+  stepsPerSecond: 20,
+
   // hold after finding the path
   endHoldMs: 1800,
   endAnimMs: 1200,
@@ -50,7 +60,52 @@ const CONFIG = {
   minStartEndMeters: 7000,
   discardIfPathLeavesBounds: true,
   zoom: 1.0,
+  hud: 1,
 };
+
+function parseRuntimeConfig(search) {
+  const params = new URLSearchParams(search || "");
+
+  const readInt = (name, def, lo, hi) => {
+    const raw = params.get(name);
+    if (raw == null) return def;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n)) return def;
+    return clamp(Math.trunc(n), lo, hi);
+  };
+
+  const readFloat = (name, def, lo, hi) => {
+    const raw = params.get(name);
+    if (raw == null) return def;
+    const n = Number.parseFloat(raw);
+    if (!Number.isFinite(n)) return def;
+    return clamp(n, lo, hi);
+  };
+
+  const readHud01 = (name, def01) => {
+    const raw = params.get(name);
+    if (raw == null) return def01;
+    if (raw === "0") return 0;
+    if (raw === "1") return 1;
+    return def01;
+  };
+
+  const stepsPerSecond = readInt("sps", DEFAULT_CONFIG.stepsPerSecond, 1, 120);
+
+  return {
+    ...DEFAULT_CONFIG,
+    stepsPerSecond,
+    // use a delay to drive the fixed-rate stepping loop
+    stepDelayMs: 1000 / stepsPerSecond,
+    zoom: readFloat("zoom", DEFAULT_CONFIG.zoom, 0.5, 2.0),
+    hud: readHud01("hud", DEFAULT_CONFIG.hud),
+    endHoldMs: readInt("endHoldMs", DEFAULT_CONFIG.endHoldMs, 0, 60000),
+    endAnimMs: readInt("endAnimMs", DEFAULT_CONFIG.endAnimMs, 0, 60000),
+    minStartEndMeters: readInt("minStartEndMeters", DEFAULT_CONFIG.minStartEndMeters, 0, 200000),
+  };
+}
+
+const CONFIG = parseRuntimeConfig(typeof window !== "undefined" ? window.location?.search : "");
 
 // --- Endpoint sampling ---
 export const ENDPOINT_SAMPLING_MAX_TRIES = 5000;
@@ -93,6 +148,10 @@ if (typeof window !== "undefined") {
 const canvas = document.getElementById("c");
 const hud = document.getElementById("hud");
 const ctx = canvas.getContext("2d", { alpha: false });
+
+if (hud && CONFIG.hud === 0) {
+  hud.style.display = "none";
+}
 
 // Background layers cached into offscreen canvases (rebuilt on resize).
 const bg = document.createElement("canvas");
@@ -637,12 +696,15 @@ function render(now) {
     `sample: <b>${Math.round(endpointSamplingDistanceMeters)}</b>m <span class="dim">·</span> tries: <b>${endpointSamplingTries}</b>` +
     (endpointSamplingBestEffort ? ` <span class="dim">·</span> <b style="color:#fb7185">min-distance not met; best-effort</b>` : "");
 
-  hud.innerHTML =
-    `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
-    `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
-    `${samplingLine}<br/>` +
-    `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b><br/>` +
-    `<span class="dim">rate</span>: ~<b>${Math.round(1000 / CONFIG.stepDelayMs)}</b> steps/sec`;
+  if (hud && CONFIG.hud !== 0) {
+    hud.innerHTML =
+      `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
+      `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
+      `${samplingLine}<br/>` +
+      `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b><br/>` +
+      `<span class="dim">cfg</span>: sps=<b>${CONFIG.stepsPerSecond}</b> zoom=<b>${CONFIG.zoom.toFixed(2)}</b> minDist=<b>${CONFIG.minStartEndMeters}</b>m<br/>` +
+      `<span class="dim">rate</span>: ~<b>${CONFIG.stepsPerSecond}</b> steps/sec`;
+  }
 
   requestAnimationFrame(tick);
 }
