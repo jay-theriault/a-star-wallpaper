@@ -11,13 +11,29 @@ const DEFAULT_BOUNDS = {
 
 const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 
-const ALLOWED_HIGHWAYS = new Set([
-  "motorway",
-  "trunk",
-  "primary",
-  "secondary",
-  "tertiary",
-]);
+const HIGHWAY_PROFILES = {
+  major: ["motorway", "trunk", "primary", "secondary"],
+  standard: ["motorway", "trunk", "primary", "secondary", "tertiary"],
+  full: [
+    "motorway",
+    "trunk",
+    "primary",
+    "secondary",
+    "tertiary",
+    "unclassified",
+    "residential",
+    "living_street",
+  ],
+};
+
+function parseProfileFromArgs(args) {
+  for (const arg of args) {
+    if (!arg.startsWith("--profile=")) continue;
+    const value = arg.split("=")[1];
+    if (value === "major" || value === "standard" || value === "full") return value;
+  }
+  return "standard";
+}
 
 function parseBoundsFromArgs(args) {
   // --north= --south= --west= --east=
@@ -53,12 +69,14 @@ function parseOutputPathFromArgs(args) {
   return null;
 }
 
-function buildQuery(bounds) {
+function buildQuery(bounds, profile) {
   const { south, west, north, east } = bounds;
+  const allowed = HIGHWAY_PROFILES[profile] || HIGHWAY_PROFILES.standard;
+  const regex = allowed.join("|");
   return `[
-    out:json][timeout:25];
+    out:json][timeout:60];
     (
-      way["highway"~"motorway|trunk|primary|secondary|tertiary"](${south},${west},${north},${east});
+      way["highway"~"${regex}"](${south},${west},${north},${east});
     );
     (._;>;);
     out body;`;
@@ -82,7 +100,9 @@ function simplifyLine(coords, minDelta = 0.00005) {
   return out;
 }
 
-function collectLines(osm) {
+function collectLines(osm, profile) {
+  const allowed = new Set(HIGHWAY_PROFILES[profile] || HIGHWAY_PROFILES.standard);
+
   const nodes = new Map();
   for (const el of osm.elements) {
     if (el.type === "node") nodes.set(el.id, [el.lon, el.lat]);
@@ -92,7 +112,7 @@ function collectLines(osm) {
   for (const el of osm.elements) {
     if (el.type !== "way") continue;
     const highway = el.tags?.highway;
-    if (!highway || !ALLOWED_HIGHWAYS.has(highway)) continue;
+    if (!highway || !allowed.has(highway)) continue;
 
     const coords = [];
     for (const nodeId of el.nodes || []) {
@@ -141,7 +161,8 @@ async function main() {
   const bounds = parseBoundsFromArgs(args);
   const format = parseFormatFromArgs(args);
   const outOverride = parseOutputPathFromArgs(args);
-  const query = buildQuery(bounds);
+  const profile = parseProfileFromArgs(args);
+  const query = buildQuery(bounds, profile);
 
   const res = await fetch(OVERPASS_URL, {
     method: "POST",
@@ -158,7 +179,7 @@ async function main() {
   const osm = await res.json();
   if (!osm?.elements) throw new Error("Invalid Overpass response");
 
-  const lines = collectLines(osm);
+  const lines = collectLines(osm, profile);
   const outPath = path.resolve(
     outOverride || (format === "compact" ? "data/osm/roads.compact.json" : "data/osm/roads.geojson"),
   );
@@ -167,11 +188,11 @@ async function main() {
   if (format === "compact") {
     const compact = toCompactFormat(lines, bounds);
     await fs.writeFile(outPath, JSON.stringify(compact));
-    console.log(`Wrote ${compact.lines.length} road lines to ${outPath}`);
+    console.log(`Wrote ${compact.lines.length} road lines to ${outPath} (profile=${profile})`);
   } else {
     const fc = toFeatureCollection(lines);
     await fs.writeFile(outPath, JSON.stringify(fc));
-    console.log(`Wrote ${fc.features.length} road features to ${outPath}`);
+    console.log(`Wrote ${fc.features.length} road features to ${outPath} (profile=${profile})`);
   }
 }
 
