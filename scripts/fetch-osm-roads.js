@@ -150,9 +150,9 @@ function toFeatureCollection(lines) {
 function toCompactFormat(lines, bounds) {
   return {
     format: "osm-roads-compact",
-    version: 1,
+    version: 2,
     bounds,
-    lines: lines.map((line) => line.coords.flat()),
+    lines: lines.map((line) => ({ h: line.highway, c: line.coords.flat() })),
   };
 }
 

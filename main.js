@@ -1,7 +1,7 @@
 import { haversineMeters, makeAStarStepper, reconstructPath } from "./astar.js";
 import { DEFAULT_GUARDRAILS, updateGuardrails } from "./guardrails.js";
 import { stepEndPhase } from "./endPhase.js";
-import { extractRoadLines } from "./roads-data.js";
+import { extractRoadLines, extractRoadLinesWithMeta } from "./roads-data.js";
 import { buildRoadGraph, graphNodeLatLon, randomGraphNode, parseRoadGraphCache } from "./road-graph.js";
 
 // --- Spec-driven constants (initial proposal; tweak later) ---
@@ -386,6 +386,7 @@ let landPolys = []; // { kind: 'land'|'water', rings: [[{lat,lon}...]] }
 let landReady = false;
 
 let roadsLines = [];
+let roadsLinesMeta = [];
 let roadsGraph = null;
 let roadsReady = false;
 let roadsPointCache = { points: [], keys: [] };
@@ -920,7 +921,8 @@ async function loadRoads() {
       data = await res.json();
     }
 
-    roadsLines = extractRoadLines(data);
+    roadsLinesMeta = extractRoadLinesWithMeta(data);
+    roadsLines = roadsLinesMeta.map((l) => l.coords);
     roadsReady = roadsLines.length > 0;
 
     if (!roadsReady) return;
@@ -950,8 +952,31 @@ async function loadRoads() {
   }
 }
 
+function roadClassPriority(highway) {
+  switch (highway) {
+    case "motorway":
+      return 0;
+    case "trunk":
+      return 1;
+    case "primary":
+      return 2;
+    case "secondary":
+      return 3;
+    case "tertiary":
+      return 4;
+    case "unclassified":
+      return 5;
+    case "residential":
+      return 6;
+    case "living_street":
+      return 7;
+    default:
+      return 50;
+  }
+}
+
 function buildRoadsLayer(rctx, w, h) {
-  if (!roadsLines.length) return;
+  if (!roadsLinesMeta.length) return;
   rctx.clearRect(0, 0, w, h);
   rctx.save();
   rctx.strokeStyle = THEME.osmRoad;
@@ -963,9 +988,19 @@ function buildRoadsLayer(rctx, w, h) {
   // We downsample long lines so we draw (at least) a little bit of everything.
   const MAX_SEGMENTS_PER_LINE = 1600;
 
+  // Prioritize major roads first so if we hit the budget, the "shape" of the map is still there.
+  const ordered = [...roadsLinesMeta].sort((a, b) => {
+    const pa = roadClassPriority(a.highway);
+    const pb = roadClassPriority(b.highway);
+    if (pa !== pb) return pa - pb;
+    // tie-break: longer lines first (helps major arterials show up)
+    return (b.coords?.length ?? 0) - (a.coords?.length ?? 0);
+  });
+
   let segments = 0;
 
-  for (const line of roadsLines) {
+  for (const item of ordered) {
+    const line = item?.coords;
     if (!line || line.length < 2) continue;
     if (segments >= MAX_ROAD_SEGMENTS) break;
 
