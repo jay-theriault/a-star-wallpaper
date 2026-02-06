@@ -1,0 +1,27 @@
+name: package-dist
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build dist
+        run: node scripts/build-dist.js
+      - name: Zip dist
+        run: |
+          cd dist
+          zip -r ../astar-lively-dist.zip .
+      - name: Upload dist zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: astar-lively-dist
+          path: astar-lively-dist.zip
