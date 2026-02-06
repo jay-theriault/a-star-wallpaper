@@ -17,7 +17,13 @@ This repo is designed to be loaded directly in **Lively Wallpaper (Windows)**.
 
 Lively will treat it as a Web/HTML wallpaper.
 
-### Option B — load via a local web server (more reliable for dev)
+### Option B — build a `dist/` zip (clean import)
+1. In this repo folder, run:
+   - `npm run build:dist`
+2. Zip the `dist/` folder (or download the artifact from GitHub Actions).
+3. In Lively: **+ Add Wallpaper** → **Browse** → select the zip.
+
+### Option C — load via a local web server (more reliable for dev)
 Some environments are stricter about loading ES modules from `file:///` URLs. If you see a blank screen, use a local server:
 
 1. In this repo folder, start a server:
