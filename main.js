@@ -410,13 +410,18 @@ const ROADS_GEO_URL = "./data/osm/roads.geojson";
 const ROADS_COMPACT_URL = "./data/osm/roads.compact.json";
 const ROAD_GRAPH_URL = "./data/osm/roadGraph.v1.json";
 const LAND_URL = "./data/osm/land.geojson";
+const COASTLINE_URL = "./data/osm/coastline.geojson";
+const PARKS_URL = "./data/osm/parks.geojson";
 const roadsLayer = document.createElement("canvas");
 const roadsCtx = roadsLayer.getContext("2d", { alpha: true });
 
 const landLayer = document.createElement("canvas");
 const landCtx = landLayer.getContext("2d", { alpha: true });
-let landPolys = []; // { kind: 'land'|'water', rings: [[{lat,lon}...]] }
+let landPolys = []; // water polys (kind=water)
 let landReady = false;
+
+let coastlineLines = []; // [[lon,lat]...]
+let parksPolys = []; // polygons (geojson-style coords)
 
 let roadsLines = [];
 let roadsLinesMeta = [];
@@ -947,48 +952,214 @@ function extractLandPolys(geojson) {
 
 async function loadLand() {
   try {
-    const res = await fetch(LAND_URL);
-    if (!res.ok) return;
-    const geojson = await res.json();
-    landPolys = extractLandPolys(geojson);
-    landReady = landPolys.length > 0;
-    if (landReady) buildLandLayer(landCtx, landLayer.width, landLayer.height);
+    const [waterRes, coastRes, parksRes] = await Promise.all([
+      fetch(LAND_URL),
+      fetch(COASTLINE_URL),
+      fetch(PARKS_URL),
+    ]);
+
+    if (waterRes.ok) {
+      const geojson = await waterRes.json();
+      landPolys = extractLandPolys(geojson);
+    }
+
+    if (coastRes.ok) {
+      const coast = await coastRes.json();
+      coastlineLines = extractCoastlineLines(coast);
+    }
+
+    if (parksRes.ok) {
+      const parks = await parksRes.json();
+      parksPolys = extractParksPolys(parks);
+    }
+
+    landReady = true;
+    buildLandLayer(landCtx, landLayer.width, landLayer.height);
   } catch (err) {
     console.warn("Failed to load land overlay", err);
   }
 }
 
+function extractCoastlineLines(geojson) {
+  const out = [];
+  const features = geojson?.features || [];
+  for (const f of features) {
+    const g = f?.geometry;
+    if (!g) continue;
+    if (g.type === "LineString" && Array.isArray(g.coordinates)) out.push(g.coordinates);
+    if (g.type === "MultiLineString" && Array.isArray(g.coordinates)) {
+      for (const line of g.coordinates) if (Array.isArray(line)) out.push(line);
+    }
+  }
+  return out;
+}
+
+function extractParksPolys(geojson) {
+  const out = [];
+  const features = geojson?.features || [];
+  for (const f of features) {
+    const g = f?.geometry;
+    if (!g) continue;
+    if (g.type === "Polygon") out.push(g.coordinates);
+    if (g.type === "MultiPolygon") {
+      for (const poly of g.coordinates || []) out.push(poly);
+    }
+  }
+  return out;
+}
+
+function buildCoastlineMask(w, h) {
+  // Low-res mask for flood fill.
+  const mw = 520;
+  const mh = Math.round((mw * h) / w);
+  const mask = document.createElement("canvas");
+  mask.width = mw;
+  mask.height = mh;
+  const mctx = mask.getContext("2d");
+
+  // 1) draw coastlines as barrier pixels
+  mctx.clearRect(0, 0, mw, mh);
+  mctx.save();
+  mctx.strokeStyle = "rgba(0,0,0,1)";
+  mctx.lineWidth = 2;
+  mctx.lineCap = "round";
+
+  for (const line of coastlineLines) {
+    if (!line || line.length < 2) continue;
+    mctx.beginPath();
+    for (let i = 0; i < line.length; i++) {
+      const [lon, lat] = line[i];
+      const p = project(lat, lon, simBounds, mw, mh);
+      if (i === 0) mctx.moveTo(p.x, p.y);
+      else mctx.lineTo(p.x, p.y);
+    }
+    mctx.stroke();
+  }
+  mctx.restore();
+
+  const img = mctx.getImageData(0, 0, mw, mh);
+  const data = img.data;
+  const barrier = new Uint8Array(mw * mh);
+  for (let i = 0; i < mw * mh; i++) {
+    const a = data[i * 4 + 3];
+    barrier[i] = a > 10 ? 1 : 0;
+  }
+
+  // 2) flood-fill ocean from a seed near NE corner (Boston bbox includes ocean to the east)
+  const ocean = new Uint8Array(mw * mh);
+  const qx = new Int32Array(mw * mh);
+  const qy = new Int32Array(mw * mh);
+  let qh = 0;
+  let qt = 0;
+
+  const seedX = Math.floor(mw * 0.92);
+  const seedY = Math.floor(mh * 0.18);
+  const push = (x, y) => {
+    if (x < 0 || y < 0 || x >= mw || y >= mh) return;
+    const idx = y * mw + x;
+    if (ocean[idx]) return;
+    if (barrier[idx]) return;
+    ocean[idx] = 1;
+    qx[qt] = x;
+    qy[qt] = y;
+    qt++;
+  };
+
+  push(seedX, seedY);
+  while (qh < qt) {
+    const x = qx[qh];
+    const y = qy[qh];
+    qh++;
+    push(x + 1, y);
+    push(x - 1, y);
+    push(x, y + 1);
+    push(x, y - 1);
+  }
+
+  return { mw, mh, ocean, barrier };
+}
+
 function buildLandLayer(lctx, w, h) {
   lctx.clearRect(0, 0, w, h);
 
-  // Paint a subtle global land tint so the map feels "grounded" even without perfect landuse.
-  lctx.save();
-  lctx.fillStyle = THEME.landFill;
-  lctx.fillRect(0, 0, w, h);
-  lctx.restore();
+  // If we have coastlines, do a coastline-based land mask.
+  if (coastlineLines.length) {
+    const { mw, mh, ocean, barrier } = buildCoastlineMask(w, h);
 
-  if (!landPolys.length) return;
-
-  // Draw water polygons on top.
-  lctx.save();
-  lctx.fillStyle = THEME.waterFill;
-
-  for (const poly of landPolys) {
-    for (const ring of poly.rings) {
-      if (!ring || ring.length < 3) continue;
-      lctx.beginPath();
-      for (let i = 0; i < ring.length; i++) {
-        const [lon, lat] = ring[i];
-        const p = project(lat, lon, simBounds, w, h);
-        if (i === 0) lctx.moveTo(p.x, p.y);
-        else lctx.lineTo(p.x, p.y);
+    // Paint land pixels (complement of ocean) as tint.
+    const img = lctx.createImageData(mw, mh);
+    const d = img.data;
+    for (let i = 0; i < mw * mh; i++) {
+      const isOcean = ocean[i] === 1;
+      const isBarrier = barrier[i] === 1;
+      if (isOcean || isBarrier) {
+        d[i * 4 + 3] = 0;
+        continue;
       }
-      lctx.closePath();
-      lctx.fill();
+      // land tint
+      d[i * 4 + 0] = 40;
+      d[i * 4 + 1] = 110;
+      d[i * 4 + 2] = 70;
+      d[i * 4 + 3] = Math.round(255 * 0.18);
     }
+
+    // Draw mask scaled up.
+    const tmp = document.createElement("canvas");
+    tmp.width = mw;
+    tmp.height = mh;
+    const tctx = tmp.getContext("2d");
+    tctx.putImageData(img, 0, 0);
+    lctx.drawImage(tmp, 0, 0, w, h);
+  } else {
+    // Fallback: global tint (previous behavior)
+    lctx.save();
+    lctx.fillStyle = THEME.landFill;
+    lctx.fillRect(0, 0, w, h);
+    lctx.restore();
   }
 
-  lctx.restore();
+  // Water polygons on top.
+  if (landPolys.length) {
+    lctx.save();
+    lctx.fillStyle = THEME.waterFill;
+    for (const poly of landPolys) {
+      for (const ring of poly.rings) {
+        if (!ring || ring.length < 3) continue;
+        lctx.beginPath();
+        for (let i = 0; i < ring.length; i++) {
+          const [lon, lat] = ring[i];
+          const p = project(lat, lon, simBounds, w, h);
+          if (i === 0) lctx.moveTo(p.x, p.y);
+          else lctx.lineTo(p.x, p.y);
+        }
+        lctx.closePath();
+        lctx.fill();
+      }
+    }
+    lctx.restore();
+  }
+
+  // Parks/green overlay.
+  if (parksPolys.length) {
+    lctx.save();
+    lctx.fillStyle = "rgba(70, 170, 95, 0.12)";
+    for (const poly of parksPolys) {
+      const rings = poly || [];
+      for (const ring of rings) {
+        if (!ring || ring.length < 3) continue;
+        lctx.beginPath();
+        for (let i = 0; i < ring.length; i++) {
+          const [lon, lat] = ring[i];
+          const p = project(lat, lon, simBounds, w, h);
+          if (i === 0) lctx.moveTo(p.x, p.y);
+          else lctx.lineTo(p.x, p.y);
+        }
+        lctx.closePath();
+        lctx.fill();
+      }
+    }
+    lctx.restore();
+  }
 }
 
 // --- OSM roads layer ---
