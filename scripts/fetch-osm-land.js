@@ -36,19 +36,18 @@ function parseOutputPathFromArgs(args) {
 function buildQuery(bounds) {
   const { south, west, north, east } = bounds;
 
-  // Keep this modest: closed ways only (no multipolygon relations) to avoid huge payloads.
-  // We pull a few broad landcover-ish tags plus water so we can paint a land layer with
-  // water cutouts.
+  // We only need water for the current rendering strategy.
+  // Important: Boston Harbor and other large water bodies are often modeled as multipolygon relations.
+  // Use `out geom` so we can build polygons without separately fetching nodes.
   return `[
-    out:json][timeout:60];
+    out:json][timeout:120];
     (
-      way["natural"~"water|wood|scrub|wetland|beach"](${south},${west},${north},${east});
-      way["landuse"~"residential|commercial|industrial|forest|grass|meadow|recreation_ground|cemetery"](${south},${west},${north},${east});
-      way["leisure"~"park|golf_course"](${south},${west},${north},${east});
+      way["natural"="water"](${south},${west},${north},${east});
       way["waterway"="riverbank"](${south},${west},${north},${east});
+      relation["type"="multipolygon"]["natural"="water"](${south},${west},${north},${east});
+      relation["type"="multipolygon"]["waterway"="riverbank"](${south},${west},${north},${east});
     );
-    (._;>;);
-    out body;`;
+    out geom;`;
 }
 
 function simplifyRing(coords, minDelta = 0.00005) {
@@ -69,49 +68,88 @@ function simplifyRing(coords, minDelta = 0.00005) {
   return out;
 }
 
-function collectClosedWayPolygons(osm) {
-  const nodes = new Map();
-  for (const el of osm.elements) {
-    if (el.type === "node") nodes.set(el.id, [el.lon, el.lat]);
+function isClosedRing(coords) {
+  if (!coords || coords.length < 4) return false;
+  const a = coords[0];
+  const b = coords[coords.length - 1];
+  return a && b && a[0] === b[0] && a[1] === b[1];
+}
+
+function wayGeomToRing(el) {
+  const geom = el?.geometry;
+  if (!Array.isArray(geom) || geom.length < 4) return null;
+  const coords = geom.map((p) => [p.lon, p.lat]).filter((c) => Number.isFinite(c[0]) && Number.isFinite(c[1]));
+  if (!isClosedRing(coords)) return null;
+  const ring = simplifyRing(coords);
+  return ring.length >= 4 ? ring : null;
+}
+
+function collectWaterPolygons(osm) {
+  const elements = osm?.elements || [];
+  const waysById = new Map();
+  for (const el of elements) {
+    if (el.type === "way") waysById.set(el.id, el);
   }
 
   const features = [];
-  for (const el of osm.elements) {
+
+  // Water as closed ways.
+  for (const el of elements) {
     if (el.type !== "way") continue;
     const tags = el.tags || {};
-
-    // classify
     const isWater = tags.natural === "water" || tags.waterway === "riverbank";
-    const kind = isWater ? "water" : "land";
+    if (!isWater) continue;
 
-    const coords = [];
-    for (const nodeId of el.nodes || []) {
-      const coord = nodes.get(nodeId);
-      if (coord) coords.push(coord);
-    }
-
-    if (coords.length < 4) continue;
-    const first = coords[0];
-    const last = coords[coords.length - 1];
-    const closed = first[0] === last[0] && first[1] === last[1];
-    if (!closed) continue;
-
-    const ring = simplifyRing(coords);
-    if (ring.length < 4) continue;
+    const ring = wayGeomToRing(el);
+    if (!ring) continue;
 
     features.push({
       type: "Feature",
       properties: {
         id: el.id,
-        kind,
+        kind: "water",
         natural: tags.natural || null,
-        landuse: tags.landuse || null,
-        leisure: tags.leisure || null,
         waterway: tags.waterway || null,
       },
       geometry: {
         type: "Polygon",
         coordinates: [ring],
+      },
+    });
+  }
+
+  // Water as multipolygon relations (use member ways with role=outer).
+  for (const el of elements) {
+    if (el.type !== "relation") continue;
+    const tags = el.tags || {};
+    const isWater = (tags.type === "multipolygon") && (tags.natural === "water" || tags.waterway === "riverbank");
+    if (!isWater) continue;
+
+    const outers = [];
+    for (const m of el.members || []) {
+      if (m.type !== "way") continue;
+      if (m.role !== "outer") continue;
+      const way = waysById.get(m.ref);
+      const ring = wayGeomToRing(way);
+      if (ring) outers.push(ring);
+    }
+    if (!outers.length) continue;
+
+    // We store as MultiPolygon with one ring per member-outer (not stitched). This is imperfect but
+    // captures big water bodies like Boston Harbor where outers are already closed.
+    const coordinates = outers.map((ring) => [ring]);
+
+    features.push({
+      type: "Feature",
+      properties: {
+        id: el.id,
+        kind: "water",
+        natural: tags.natural || null,
+        waterway: tags.waterway || null,
+      },
+      geometry: {
+        type: coordinates.length === 1 ? "Polygon" : "MultiPolygon",
+        coordinates: coordinates.length === 1 ? coordinates[0] : coordinates,
       },
     });
   }
@@ -139,10 +177,10 @@ async function main() {
   const osm = await res.json();
   if (!osm?.elements) throw new Error("Invalid Overpass response");
 
-  const fc = collectClosedWayPolygons(osm);
+  const fc = collectWaterPolygons(osm);
   fc.bounds = bounds;
   fc.format = "osm-land-geojson";
-  fc.version = 1;
+  fc.version = 2;
 
   const outPath = path.resolve(outOverride || "data/osm/land.geojson");
   await fs.mkdir(path.dirname(outPath), { recursive: true });
