@@ -13,14 +13,17 @@ const BOUNDS = {
 };
 
 const THEME = {
-  bg0: "#070a10",
-  bg1: "#0b1020",
+  // Treat the base background gradient as "ocean" so land tint + water polygons read distinctly.
+  bg0: "#050a12",
+  bg1: "#07162a",
   grid: "rgba(255,255,255,0.035)",
   road: "rgba(210,225,255,0.055)",
   roadDash: "rgba(255,255,255,0.08)",
   osmRoad: "rgba(90,100,110,0.45)",
-  landFill: "rgba(40, 90, 55, 0.14)",
-  waterFill: "rgba(25, 55, 90, 0.22)",
+  // Land tint on top of ocean background.
+  landFill: "rgba(40, 110, 70, 0.18)",
+  // Water polygons (rivers/harbor) on top of land tint.
+  waterFill: "rgba(45, 140, 210, 0.22)",
 
   // Tuned for legibility on dark background (open/closed/current are distinct).
   open: "#22d3ee", // cyan
