@@ -19,6 +19,8 @@ const THEME = {
   road: "rgba(210,225,255,0.055)",
   roadDash: "rgba(255,255,255,0.08)",
   osmRoad: "rgba(90,100,110,0.45)",
+  landFill: "rgba(40, 90, 55, 0.14)",
+  waterFill: "rgba(25, 55, 90, 0.22)",
 
   // Tuned for legibility on dark background (open/closed/current are distinct).
   open: "#22d3ee", // cyan
@@ -52,6 +54,7 @@ function clamp(v, lo, hi) {
 //   - showCurrent: 0|1 (default 1)
 //   - showPathDuringSearch: 0|1 (default 0)
 //   - showRoads: 0|1 (default 1)
+//   - showLand: 0|1 (default 1)
 //   - maxStepsPerFrame: int [1, 500] (default 60)
 //   - endpointMode: roads|random (default roads)
 //   - graph: roads|grid (default roads)
@@ -94,6 +97,7 @@ export const DEFAULT_CONFIG = {
   showCurrent: 1,
   showPathDuringSearch: 0,
   showRoads: 1,
+  showLand: 1,
   endpointMode: "roads",
   graph: "roads",
   soak: 0,
@@ -110,6 +114,7 @@ const PRESET_CONFIG = {
     showCurrent: 0,
     showPathDuringSearch: 0,
     showRoads: 1,
+    showLand: 1,
   },
   debug: {
     stepsPerSecond: 45,
@@ -121,6 +126,7 @@ const PRESET_CONFIG = {
     showCurrent: 1,
     showPathDuringSearch: 1,
     showRoads: 1,
+    showLand: 1,
   },
 };
 
@@ -199,6 +205,7 @@ export function parseRuntimeConfig(search) {
     showCurrent: read01("showCurrent", base.showCurrent),
     showPathDuringSearch: read01("showPathDuringSearch", base.showPathDuringSearch),
     showRoads: read01("showRoads", base.showRoads),
+    showLand: read01("showLand", base.showLand),
   };
 }
 
@@ -364,8 +371,15 @@ const ctx = canvas.getContext("2d", { alpha: false });
 const ROADS_GEO_URL = "./data/osm/roads.geojson";
 const ROADS_COMPACT_URL = "./data/osm/roads.compact.json";
 const ROAD_GRAPH_URL = "./data/osm/roadGraph.v1.json";
+const LAND_URL = "./data/osm/land.geojson";
 const roadsLayer = document.createElement("canvas");
 const roadsCtx = roadsLayer.getContext("2d", { alpha: true });
+
+const landLayer = document.createElement("canvas");
+const landCtx = landLayer.getContext("2d", { alpha: true });
+let landPolys = []; // { kind: 'land'|'water', rings: [[{lat,lon}...]] }
+let landReady = false;
+
 let roadsLines = [];
 let roadsGraph = null;
 let roadsReady = false;
@@ -373,6 +387,7 @@ let roadsPointCache = { points: [], keys: [] };
 let roadGraph = null;
 let roadGraphReady = false;
 let showRoads = CONFIG.showRoads;
+let showLand = CONFIG.showLand;
 
 let helpVisible = false;
 
@@ -410,6 +425,10 @@ function resize() {
   roadsLayer.width = Math.max(1, Math.floor(window.innerWidth));
   roadsLayer.height = Math.max(1, Math.floor(window.innerHeight));
   if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+
+  landLayer.width = Math.max(1, Math.floor(window.innerWidth));
+  landLayer.height = Math.max(1, Math.floor(window.innerHeight));
+  if (landReady) buildLandLayer(landCtx, landLayer.width, landLayer.height);
 }
 window.addEventListener("resize", resize);
 resize();
@@ -419,12 +438,17 @@ window.addEventListener("keydown", (e) => {
     showRoads = showRoads ? 0 : 1;
   }
 
+  if (e.key?.toLowerCase() === "l") {
+    showLand = showLand ? 0 : 1;
+  }
+
   if (e.key === "?") {
     helpVisible = !helpVisible;
     if (help) help.style.display = helpVisible ? "block" : "none";
   }
 });
 
+loadLand();
 loadRoads();
 
 // --- Coordinate helpers ---
@@ -796,6 +820,69 @@ function buildBackground(bctx, w, h) {
   bctx.restore();
 }
 
+// --- OSM land/water overlay ---
+function extractLandPolys(geojson) {
+  const features = geojson?.features || [];
+  const polys = [];
+
+  for (const f of features) {
+    const kind = f?.properties?.kind === "water" ? "water" : "land";
+    const geom = f?.geometry;
+    if (!geom) continue;
+
+    if (geom.type === "Polygon") {
+      const rings = geom.coordinates || [];
+      if (rings.length) polys.push({ kind, rings });
+    } else if (geom.type === "MultiPolygon") {
+      const parts = geom.coordinates || [];
+      for (const rings of parts) {
+        if (rings?.length) polys.push({ kind, rings });
+      }
+    }
+  }
+
+  return polys;
+}
+
+async function loadLand() {
+  try {
+    const res = await fetch(LAND_URL);
+    if (!res.ok) return;
+    const geojson = await res.json();
+    landPolys = extractLandPolys(geojson);
+    landReady = landPolys.length > 0;
+    if (landReady) buildLandLayer(landCtx, landLayer.width, landLayer.height);
+  } catch (err) {
+    console.warn("Failed to load land overlay", err);
+  }
+}
+
+function buildLandLayer(lctx, w, h) {
+  lctx.clearRect(0, 0, w, h);
+  if (!landPolys.length) return;
+
+  for (const poly of landPolys) {
+    const fill = poly.kind === "water" ? THEME.waterFill : THEME.landFill;
+    lctx.save();
+    lctx.fillStyle = fill;
+
+    for (const ring of poly.rings) {
+      if (!ring || ring.length < 3) continue;
+      lctx.beginPath();
+      for (let i = 0; i < ring.length; i++) {
+        const [lon, lat] = ring[i];
+        const p = project(lat, lon, simBounds, w, h);
+        if (i === 0) lctx.moveTo(p.x, p.y);
+        else lctx.lineTo(p.x, p.y);
+      }
+      lctx.closePath();
+      lctx.fill();
+    }
+
+    lctx.restore();
+  }
+}
+
 // --- OSM roads layer ---
 async function loadRoads() {
   const cacheBounds = applyZoom(BOUNDS, CONFIG.zoom);
@@ -1138,6 +1225,10 @@ function render(now) {
   ctx.globalAlpha = 1;
   ctx.drawImage(bg, 0, 0, w, h);
 
+  if (showLand && landReady) {
+    ctx.drawImage(landLayer, 0, 0, w, h);
+  }
+
   if (showRoads && roadsReady) {
     ctx.drawImage(roadsLayer, 0, 0, w, h);
   }
@@ -1248,7 +1339,8 @@ function render(now) {
       ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
       ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
       ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
-      ` roads=<b>${showRoads ? 1 : 0}</b>`;
+      ` roads=<b>${showRoads ? 1 : 0}</b>` +
+      ` land=<b>${showLand ? 1 : 0}</b>`;
 
     hud.innerHTML =
       `<b>A*</b> Greater Boston <span class="dim">· graph ${graphLabel} · cycle ${cycle}</span><br/>` +
@@ -1268,7 +1360,8 @@ function render(now) {
       ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
       ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
       ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
-      ` roads=<b>${showRoads ? 1 : 0}</b>`;
+      ` roads=<b>${showRoads ? 1 : 0}</b>` +
+      ` land=<b>${showLand ? 1 : 0}</b>`;
 
     const paramsLine =
       `mode=<b>${modeLabel}</b>` +
@@ -1282,10 +1375,10 @@ function render(now) {
 
     help.innerHTML =
       `<b>Help</b> <span class="dim">· toggle with ?</span><br/>` +
-      `<span class="dim">keys</span>: <span class="key">r</span> roads <span class="dim">·</span> <span class="key">?</span> help<br/>` +
+      `<span class="dim">keys</span>: <span class="key">r</span> roads <span class="dim">·</span> <span class="key">l</span> land <span class="dim">·</span> <span class="key">?</span> help<br/>` +
       `<span class="dim">toggles</span>: ${togglesLine}<br/>` +
       `<span class="dim">query params</span>: ${paramsLine}<br/>` +
-      `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, graph, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads`;
+      `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, graph, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads, showLand`;
   }
 
   requestAnimationFrame(tick);
