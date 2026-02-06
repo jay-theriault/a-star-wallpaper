@@ -1010,7 +1010,8 @@ function extractParksPolys(geojson) {
 
 function buildCoastlineMask(w, h) {
   // Low-res mask for flood fill.
-  const mw = 520;
+  // Increase resolution to avoid narrow channels getting "sealed" by thick lines.
+  const mw = 1024;
   const mh = Math.round((mw * h) / w);
   const mask = document.createElement("canvas");
   mask.width = mw;
@@ -1021,8 +1022,9 @@ function buildCoastlineMask(w, h) {
   mctx.clearRect(0, 0, mw, mh);
   mctx.save();
   mctx.strokeStyle = "rgba(0,0,0,1)";
-  mctx.lineWidth = 2;
+  mctx.lineWidth = 1;
   mctx.lineCap = "round";
+  mctx.lineJoin = "round";
 
   for (const line of coastlineLines) {
     if (!line || line.length < 2) continue;
@@ -1040,9 +1042,11 @@ function buildCoastlineMask(w, h) {
   const img = mctx.getImageData(0, 0, mw, mh);
   const data = img.data;
   const barrier = new Uint8Array(mw * mh);
+
+  // Threshold higher so antialiasing doesn't create fat barriers that close harbor mouths.
   for (let i = 0; i < mw * mh; i++) {
     const a = data[i * 4 + 3];
-    barrier[i] = a > 10 ? 1 : 0;
+    barrier[i] = a > 220 ? 1 : 0;
   }
 
   // 2) flood-fill ocean from a seed near NE corner (Boston bbox includes ocean to the east)
@@ -1052,8 +1056,8 @@ function buildCoastlineMask(w, h) {
   let qh = 0;
   let qt = 0;
 
-  const seedX = Math.floor(mw * 0.92);
-  const seedY = Math.floor(mh * 0.18);
+  const seedX = Math.floor(mw * 0.95);
+  const seedY = Math.floor(mh * 0.15);
   const push = (x, y) => {
     if (x < 0 || y < 0 || x >= mw || y >= mh) return;
     const idx = y * mw + x;
