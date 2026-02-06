@@ -1,6 +1,6 @@
 # A* Desktop Background (for Lively Wallpaper)
 
-A lightweight **HTML/Canvas** wallpaper that animates an A* search (open/closed sets + final path) over a prototype grid mapped to the **Greater Boston** bounding box.
+A lightweight **HTML/Canvas** wallpaper that animates an A* search (open/closed sets + final path) over the **Greater Boston** bounding box. By default it routes on the cached OSM road graph, with a grid fallback.
 
 This repo is designed to be loaded directly in **Lively Wallpaper (Windows)**.
 
@@ -50,6 +50,7 @@ All params are **optional**. Out-of-range values are **clamped**; non-numeric/in
 - `showCurrent`: **0|1** (default **1**)
 - `showPathDuringSearch`: **0|1** (default **0**)
 - `showRoads`: **0|1** (default **1**)
+- `graph`: **roads|grid** (default **roads**)
 - `endHoldMs`: int **[0, 60000]** (default: whatever `main.js` ships with)
 - `endAnimMs`: int **[0, 60000]** (default: whatever `main.js` ships with)
 - `minStartEndMeters`: int **[0, 200000]** (default: whatever `main.js` ships with)
@@ -66,6 +67,9 @@ All params are **optional**. Out-of-range values are **clamped**; non-numeric/in
 
 4) Show a faint "path hint" during the search (useful for debugging):
 - `index.html?showPathDuringSearch=1&sps=25&zoom=1.1`
+
+5) Force grid mode (fallback):
+- `index.html?graph=grid`
 
 Tip: press **R** to toggle the roads layer, and **?** to open the help overlay with current settings.
 
@@ -108,5 +112,5 @@ node scripts/fetch-osm-roads.js --format=compact
 ---
 
 ## Notes / roadmap
-- Current graph is a **regular grid** (prototype).
+- Current graph defaults to the **OSM road network** (cached). Use `graph=grid` to fall back to the prototype grid.
 - Road network layer uses cached OSM data (see above).
