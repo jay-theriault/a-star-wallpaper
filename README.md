@@ -41,6 +41,7 @@ You can tweak runtime behavior by adding query-string parameters to the URL you 
 All params are **optional**. Out-of-range values are **clamped**; non-numeric/invalid values **fall back to defaults** (no errors).
 
 ### Supported params
+- `mode`: **chill|debug** (preset bundle; explicit params still win)
 - `sps` (steps per second): integer **[1, 120]** (default **20**)
 - `maxStepsPerFrame`: int **[1, 500]** (default **60**)
 - `zoom`: float **[0.5, 2.0]** (default **1.0**)
@@ -54,16 +55,19 @@ All params are **optional**. Out-of-range values are **clamped**; non-numeric/in
 - `minStartEndMeters`: int **[0, 200000]** (default: whatever `main.js` ships with)
 
 ### Examples
-1) Faster search, zoomed in:
+1) Chill preset (slow pacing + minimal overlays):
+- `index.html?mode=chill`
+
+2) Faster search, zoomed in:
 - `index.html?zoom=1.2&sps=45&maxStepsPerFrame=120`
 
-2) Clean wallpaper mode (hide HUD + hide open/closed sets):
+3) Clean wallpaper mode (hide HUD + hide open/closed sets):
 - `index.html?hud=0&showOpenClosed=0`
 
-3) Show a faint "path hint" during the search (useful for debugging):
+4) Show a faint "path hint" during the search (useful for debugging):
 - `index.html?showPathDuringSearch=1&sps=25&zoom=1.1`
 
-Tip: press **R** to toggle the roads layer at runtime.
+Tip: press **R** to toggle the roads layer, and **?** to open the help overlay with current settings.
 
 ### Edit defaults
 Open `main.js` and adjust `DEFAULT_CONFIG` (or other constants) to change the shipped defaults.

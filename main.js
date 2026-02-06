@@ -36,6 +36,7 @@ function clamp(v, lo, hi) {
 // --- Runtime configuration (query params) ---
 //
 // Supported query params (invalid values fall back to defaults):
+//   - mode: chill|debug (preset bundle)
 //   - sps: integer [1, 120] (steps per second)
 //   - zoom: float [0.5, 2.0]
 //   - hud: 0|1
@@ -51,7 +52,7 @@ function clamp(v, lo, hi) {
 //   - showHud: 0|1 (alias for hud)
 //   - soak: 0|1 (default 0)
 
-const DEFAULT_CONFIG = {
+export const DEFAULT_CONFIG = {
   stepsPerSecond: 20,
   maxStepsPerFrame: 60,
 
@@ -87,8 +88,38 @@ const DEFAULT_CONFIG = {
   soak: 0,
 };
 
-function parseRuntimeConfig(search) {
+const PRESET_CONFIG = {
+  chill: {
+    stepsPerSecond: 12,
+    maxStepsPerFrame: 30,
+    endHoldMs: 3000,
+    endAnimMs: 2000,
+    hud: 0,
+    showOpenClosed: 0,
+    showCurrent: 0,
+    showPathDuringSearch: 0,
+    showRoads: 1,
+  },
+  debug: {
+    stepsPerSecond: 45,
+    maxStepsPerFrame: 140,
+    endHoldMs: 900,
+    endAnimMs: 700,
+    hud: 1,
+    showOpenClosed: 1,
+    showCurrent: 1,
+    showPathDuringSearch: 1,
+    showRoads: 1,
+  },
+};
+
+export function parseRuntimeConfig(search) {
   const params = new URLSearchParams(search || "");
+
+  const modeRaw = params.get("mode");
+  const mode = modeRaw === "chill" || modeRaw === "debug" ? modeRaw : null;
+  const preset = mode ? PRESET_CONFIG[mode] : null;
+  const base = { ...DEFAULT_CONFIG, ...(preset || {}) };
 
   const readInt = (name, def, lo, hi) => {
     const raw = params.get(name);
@@ -120,31 +151,32 @@ function parseRuntimeConfig(search) {
     return allowed.has(raw) ? raw : def;
   };
 
-  const stepsPerSecond = readInt("sps", DEFAULT_CONFIG.stepsPerSecond, 1, 120);
-  const maxStepsPerFrame = readInt("maxStepsPerFrame", DEFAULT_CONFIG.maxStepsPerFrame, 1, 500);
+  const stepsPerSecond = readInt("sps", base.stepsPerSecond, 1, 120);
+  const maxStepsPerFrame = readInt("maxStepsPerFrame", base.maxStepsPerFrame, 1, 500);
 
-  const hud = read01("hud", read01("showHud", DEFAULT_CONFIG.hud));
-  const endpointMode = readEnum("endpointMode", DEFAULT_CONFIG.endpointMode, new Set(["roads", "random"]));
-  const soak = read01("soak", DEFAULT_CONFIG.soak);
+  const hud = read01("hud", read01("showHud", base.hud));
+  const endpointMode = readEnum("endpointMode", base.endpointMode, new Set(["roads", "random"]));
+  const soak = read01("soak", base.soak);
 
   return {
-    ...DEFAULT_CONFIG,
+    ...base,
+    mode,
     stepsPerSecond,
     maxStepsPerFrame,
     // use a delay to drive the fixed-rate stepping loop
     stepDelayMs: 1000 / stepsPerSecond,
-    zoom: readFloat("zoom", DEFAULT_CONFIG.zoom, 0.5, 2.0),
+    zoom: readFloat("zoom", base.zoom, 0.5, 2.0),
     hud,
     endpointMode,
     soak,
-    endHoldMs: readInt("endHoldMs", DEFAULT_CONFIG.endHoldMs, 0, 60000),
-    endAnimMs: readInt("endAnimMs", DEFAULT_CONFIG.endAnimMs, 0, 60000),
-    minStartEndMeters: readInt("minStartEndMeters", DEFAULT_CONFIG.minStartEndMeters, 0, 200000),
+    endHoldMs: readInt("endHoldMs", base.endHoldMs, 0, 60000),
+    endAnimMs: readInt("endAnimMs", base.endAnimMs, 0, 60000),
+    minStartEndMeters: readInt("minStartEndMeters", base.minStartEndMeters, 0, 200000),
 
-    showOpenClosed: read01("showOpenClosed", DEFAULT_CONFIG.showOpenClosed),
-    showCurrent: read01("showCurrent", DEFAULT_CONFIG.showCurrent),
-    showPathDuringSearch: read01("showPathDuringSearch", DEFAULT_CONFIG.showPathDuringSearch),
-    showRoads: read01("showRoads", DEFAULT_CONFIG.showRoads),
+    showOpenClosed: read01("showOpenClosed", base.showOpenClosed),
+    showCurrent: read01("showCurrent", base.showCurrent),
+    showPathDuringSearch: read01("showPathDuringSearch", base.showPathDuringSearch),
+    showRoads: read01("showRoads", base.showRoads),
   };
 }
 
@@ -286,6 +318,7 @@ export function buildRoadPointCacheFromGeojson(
 if (typeof window !== "undefined") {
 const canvas = document.getElementById("c");
 const hud = document.getElementById("hud");
+const help = document.getElementById("help");
 const ctx = canvas.getContext("2d", { alpha: false });
 
 const ROADS_URL = "./data/osm/roads.geojson";
@@ -296,8 +329,14 @@ let roadsReady = false;
 let roadsPointCache = { points: [], keys: [] };
 let showRoads = CONFIG.showRoads;
 
+let helpVisible = false;
+
 if (hud && CONFIG.hud === 0) {
   hud.style.display = "none";
+}
+
+if (help) {
+  help.style.display = "none";
 }
 
 // Background layers cached into offscreen canvases (rebuilt on resize).
@@ -333,6 +372,11 @@ resize();
 window.addEventListener("keydown", (e) => {
   if (e.key?.toLowerCase() === "r") {
     showRoads = showRoads ? 0 : 1;
+  }
+
+  if (e.key === "?") {
+    helpVisible = !helpVisible;
+    if (help) help.style.display = helpVisible ? "block" : "none";
   }
 });
 
@@ -1013,6 +1057,32 @@ function render(now) {
       `${vizLine}<br/>` +
       `<span class="dim">cfg</span>: sps=<b>${CONFIG.stepsPerSecond}</b> maxStepsPerFrame=<b>${CONFIG.maxStepsPerFrame}</b> zoom=<b>${CONFIG.zoom.toFixed(2)}</b><br/>` +
       `<span class="dim">cfg</span>: minDist=<b>${CONFIG.minStartEndMeters}</b>m`;
+  }
+
+  if (help) {
+    const modeLabel = CONFIG.mode ?? "default";
+    const togglesLine =
+      `hud=<b>${CONFIG.hud ? 1 : 0}</b>` +
+      ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
+      ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
+      ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
+      ` roads=<b>${showRoads ? 1 : 0}</b>`;
+
+    const paramsLine =
+      `mode=<b>${modeLabel}</b>` +
+      ` sps=<b>${CONFIG.stepsPerSecond}</b>` +
+      ` maxStepsPerFrame=<b>${CONFIG.maxStepsPerFrame}</b>` +
+      ` zoom=<b>${CONFIG.zoom.toFixed(2)}</b>` +
+      ` endHoldMs=<b>${CONFIG.endHoldMs}</b>` +
+      ` endAnimMs=<b>${CONFIG.endAnimMs}</b>` +
+      ` minStartEndMeters=<b>${CONFIG.minStartEndMeters}</b>`;
+
+    help.innerHTML =
+      `<b>Help</b> <span class="dim">· toggle with ?</span><br/>` +
+      `<span class="dim">keys</span>: <span class="key">r</span> roads <span class="dim">·</span> <span class="key">?</span> help<br/>` +
+      `<span class="dim">toggles</span>: ${togglesLine}<br/>` +
+      `<span class="dim">query params</span>: ${paramsLine}<br/>` +
+      `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads`;
   }
 
   requestAnimationFrame(tick);
