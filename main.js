@@ -2,7 +2,7 @@ import { haversineMeters, makeAStarStepper, reconstructPath } from "./astar.js";
 import { DEFAULT_GUARDRAILS, updateGuardrails } from "./guardrails.js";
 import { stepEndPhase } from "./endPhase.js";
 import { extractRoadLines } from "./roads-data.js";
-import { buildRoadGraph, graphNodeLatLon, randomGraphNode } from "./road-graph.js";
+import { buildRoadGraph, graphNodeLatLon, randomGraphNode, parseRoadGraphCache } from "./road-graph.js";
 
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
@@ -319,6 +319,40 @@ export function buildRoadPointCacheFromGeojson(
   return { points, keys: Array.from(keySet) };
 }
 
+export function buildRoadPointCacheFromGraph(
+  graph,
+  bounds,
+  cols = CONFIG.gridCols,
+  rows = CONFIG.gridRows,
+  { maxPoints = MAX_ROAD_POINTS } = {}
+) {
+  if (!graph?.nodes?.length) return { points: [], keys: [] };
+  const points = [];
+  for (const node of graph.nodes) {
+    const lat = node?.lat;
+    const lon = node?.lon;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    if (!inBoundsLatLon(lat, lon, bounds)) continue;
+    points.push({ lat, lon });
+  }
+
+  if (points.length > maxPoints) {
+    const step = Math.ceil(points.length / maxPoints);
+    const slim = [];
+    for (let i = 0; i < points.length; i += step) slim.push(points[i]);
+    points.length = 0;
+    points.push(...slim);
+  }
+
+  const keySet = new Set();
+  for (const p of points) {
+    const k = latLonToCellKey(p.lat, p.lon, bounds, cols, rows);
+    if (k) keySet.add(k);
+  }
+
+  return { points, keys: Array.from(keySet) };
+}
+
 // --- Canvas setup ---
 if (typeof window !== "undefined") {
 const canvas = document.getElementById("c");
@@ -328,9 +362,11 @@ const ctx = canvas.getContext("2d", { alpha: false });
 
 const ROADS_GEO_URL = "./data/osm/roads.geojson";
 const ROADS_COMPACT_URL = "./data/osm/roads.compact.json";
+const ROAD_GRAPH_URL = "./data/osm/roadGraph.v1.json";
 const roadsLayer = document.createElement("canvas");
 const roadsCtx = roadsLayer.getContext("2d", { alpha: true });
 let roadsLines = [];
+let roadsGraph = null;
 let roadsReady = false;
 let roadsPointCache = { points: [], keys: [] };
 let roadGraph = null;
@@ -733,6 +769,25 @@ function buildBackground(bctx, w, h) {
 
 // --- OSM roads layer ---
 async function loadRoads() {
+  const cacheBounds = applyZoom(BOUNDS, CONFIG.zoom);
+
+  // 1) Try to load a precomputed road graph cache (dev-time generated).
+  try {
+    const res = await fetch(ROAD_GRAPH_URL);
+    if (res.ok) {
+      const cached = parseRoadGraphCache(await res.json());
+      if (cached) {
+        roadGraph = cached;
+        roadGraphReady = roadGraph.nodes.length > 0;
+        roadsPointCache = buildRoadPointCacheFromGraph(roadGraph, cacheBounds);
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to load road graph cache", err);
+  }
+
+  // 2) Load road lines (compact preferred; GeoJSON fallback) for rendering,
+  // and as a fallback graph source if cache isn't available.
   try {
     let data = null;
     let res = await fetch(ROADS_COMPACT_URL);
@@ -746,21 +801,28 @@ async function loadRoads() {
 
     roadsLines = extractRoadLines(data);
     roadsReady = roadsLines.length > 0;
-    if (roadsReady) {
-      const cacheBounds = applyZoom(BOUNDS, CONFIG.zoom);
-      roadsPointCache = buildRoadPointCacheFromGeojson(data, cacheBounds);
+
+    if (!roadsReady) return;
+
+    // Always build the roads layer from lines.
+    buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+
+    // If we didn't get a cached road graph, build one from the lines.
+    if (!roadGraphReady) {
       roadGraph = buildRoadGraph(roadsLines, {
         toleranceMeters: 8,
         bounds: cacheBounds,
       });
       roadGraphReady = roadGraph.nodes.length > 0;
-      buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
-      if (
-        (CONFIG.graph === "roads" && roadGraphReady) ||
-        (CONFIG.endpointMode === "roads" && roadsPointCache.keys.length > 0)
-      ) {
-        pickEndpoints();
-      }
+    }
+
+    // Ensure we have a point cache for snapping/endpoint sampling.
+    if (!roadsPointCache.keys.length) {
+      roadsPointCache = buildRoadPointCacheFromGeojson(data, cacheBounds);
+    }
+
+    if ((CONFIG.graph === "roads" && roadGraphReady) || (CONFIG.endpointMode === "roads" && roadsPointCache.keys.length > 0)) {
+      pickEndpoints();
     }
   } catch (err) {
     console.warn("Failed to load roads layer", err);

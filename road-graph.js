@@ -1,5 +1,9 @@
 import { haversineMeters } from "./astar.js";
 
+// Versioned cache format for optional precomputed road graphs.
+export const ROAD_GRAPH_FORMAT = "osm-road-graph";
+export const ROAD_GRAPH_VERSION = 1;
+
 const EARTH_METERS_PER_DEG = 111320;
 
 function inBounds(lat, lon, bounds) {
@@ -90,6 +94,14 @@ export function buildRoadGraph(lines, { toleranceMeters = 10, bounds = null, max
   };
 }
 
+// Compatibility alias used by cache tooling.
+export function buildRoadGraphFromLines(lines, options = {}) {
+  const toleranceMeters = options.snapToleranceMeters ?? options.toleranceMeters ?? 10;
+  const bounds = options.bounds ?? null;
+  const maxNodes = options.maxNodes ?? 250000;
+  return buildRoadGraph(lines, { toleranceMeters, bounds, maxNodes });
+}
+
 export function randomGraphNode(graph, rng = Math.random) {
   if (!graph?.nodes?.length) return null;
   const idx = Math.floor(rng() * graph.nodes.length);
@@ -114,4 +126,41 @@ export function findNearestGraphNode(graph, lat, lon) {
     }
   }
   return best;
+}
+
+export function parseRoadGraphCache(payload) {
+  if (!payload || payload.format !== ROAD_GRAPH_FORMAT || payload.version !== ROAD_GRAPH_VERSION) return null;
+  if (!Array.isArray(payload.nodes) || !Array.isArray(payload.edges)) return null;
+
+  const nodes = payload.nodes.map((n, idx) => ({
+    id: idx,
+    lat: n?.lat,
+    lon: n?.lon,
+    count: 1,
+  }));
+
+  // payload.edges: Array<Array<[to, weight]>>
+  const edgesRaw = payload.edges;
+  const adjacency = edgesRaw.map((list) =>
+    (list || []).map((pair) => ({ to: pair?.[0], weight: pair?.[1] }))
+  );
+  const costMaps = edgesRaw.map((list) => {
+    const m = new Map();
+    for (const pair of list || []) {
+      const to = pair?.[0];
+      const w = pair?.[1];
+      if (Number.isInteger(to) && Number.isFinite(w)) m.set(to, w);
+    }
+    return m;
+  });
+
+  const edges = adjacency.reduce((acc, list) => acc + list.length, 0);
+
+  return {
+    nodes,
+    adjacency,
+    costMaps,
+    edges,
+    toleranceMeters: payload?.options?.snapToleranceMeters ?? payload?.options?.toleranceMeters ?? 10,
+  };
 }
