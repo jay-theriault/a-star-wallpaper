@@ -208,6 +208,7 @@ const CONFIG = parseRuntimeConfig(typeof window !== "undefined" ? window.locatio
 export const ENDPOINT_SAMPLING_MAX_TRIES = 5000;
 
 const MAX_RENDER_NODES_PER_SET = 3500;
+const MAX_RENDER_NODES_PER_FRAME = 5200;
 const MAX_ROAD_SEGMENTS = 120000;
 const ROAD_POINT_STRIDE = 2;
 const MAX_ROAD_POINTS = 7000;
@@ -547,7 +548,35 @@ function keyToLatLon(k, bounds) {
   return cellLatLon(i, j, bounds);
 }
 
+let graphProjectionCache = {
+  key: "",
+  points: [],
+};
+
+function graphProjectionKey(bounds, w, h) {
+  return `${bounds.north.toFixed(5)},${bounds.south.toFixed(5)},${bounds.west.toFixed(5)},${bounds.east.toFixed(5)}|${w}x${h}`;
+}
+
+function ensureGraphProjection(w, h) {
+  if (!isRoadGraphActive()) return;
+  const key = graphProjectionKey(simBounds, w, h);
+  if (graphProjectionCache.key === key && graphProjectionCache.points.length === roadGraph.nodes.length) return;
+
+  const points = new Array(roadGraph.nodes.length);
+  for (const node of roadGraph.nodes) {
+    points[node.id] = project(node.lat, node.lon, simBounds, w, h);
+  }
+
+  graphProjectionCache = { key, points };
+}
+
 function keyToXY(k, w, h) {
+  if (isRoadGraphActive()) {
+    ensureGraphProjection(w, h);
+    const p = graphProjectionCache.points[k];
+    if (p) return p;
+  }
+
   const ll = keyToLatLon(k, simBounds);
   if (!ll) return { x: -1000, y: -1000 };
   return project(ll.lat, ll.lon, simBounds, w, h);
@@ -909,13 +938,16 @@ function drawNodeDot(p, r, color, a) {
   ctx.restore();
 }
 
-function drawSet(step, keys, w, h, color, baseAlpha) {
+function drawSet(step, keys, w, h, color, baseAlpha, budget = MAX_RENDER_NODES_PER_SET) {
+  if (!keys || budget <= 0) return 0;
+
   // Draw with "soft" additive style for better readability.
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
 
+  const limit = Math.min(MAX_RENDER_NODES_PER_SET, Math.max(1, budget));
   const total = keys?.size ?? keys?.length ?? 0;
-  const stride = total > MAX_RENDER_NODES_PER_SET ? Math.ceil(total / MAX_RENDER_NODES_PER_SET) : 1;
+  const stride = total > limit ? Math.ceil(total / limit) : 1;
   let idx = 0;
   let drawn = 0;
 
@@ -926,7 +958,7 @@ function drawSet(step, keys, w, h, color, baseAlpha) {
     }
     idx += 1;
     drawn += 1;
-    if (drawn > MAX_RENDER_NODES_PER_SET) break;
+    if (drawn > limit) break;
 
     const p = cellToXY(k, w, h);
     const f = step?.fScore?.get(k);
@@ -950,6 +982,7 @@ function drawSet(step, keys, w, h, color, baseAlpha) {
   }
 
   ctx.restore();
+  return drawn;
 }
 
 function strokePath(keys, w, h, count) {
@@ -1119,8 +1152,11 @@ function render(now) {
 
   if (currentStep && currentStep.status === "searching") {
     if (CONFIG.showOpenClosed !== 0) {
-      drawSet(currentStep, currentStep.closedSet, w, h, THEME.closed, 0.08);
-      drawSet(currentStep, currentStep.openSet, w, h, THEME.open, 0.11);
+      let budget = MAX_RENDER_NODES_PER_FRAME;
+      budget -= drawSet(currentStep, currentStep.closedSet, w, h, THEME.closed, 0.08, budget);
+      if (budget > 0) {
+        drawSet(currentStep, currentStep.openSet, w, h, THEME.open, 0.11, budget);
+      }
     }
 
     if (CONFIG.showPathDuringSearch !== 0) {
@@ -1182,14 +1218,22 @@ function render(now) {
         (guardrailState.relaxCyclesRemaining > 0 ? ` <b style="color:#fbbf24">RELAXED</b>` : "")
       : "";
 
-  const graphLabel = isRoadGraphActive() ? "roads" : "grid";
   const graphStats = isRoadGraphActive()
-    ? `<span class="key">graph</span>: <b>${roadGraph.nodes.length}</b> nodes <span class="dim">·</span> <b>${roadGraph.edges}</b> edges`
-    : `<span class="key">graph</span>: <b>${CONFIG.gridCols}×${CONFIG.gridRows}</b> grid`;
+    ? `<span class="key">graph</span>: <b>roads</b>` +
+      ` <span class="dim">·</span> <span class="key">nodes</span>: <b>${roadGraph.nodes.length}</b>` +
+      ` <span class="dim">·</span> <span class="key">edges</span>: <b>${roadGraph.edges}</b>`
+    : CONFIG.graph === "roads"
+      ? `<span class="key">graph</span>: <b>roads</b>` +
+        ` <span class="dim">·</span> <span class="key">nodes</span>: <b class="dim">loading</b>`
+      : `<span class="key">graph</span>: <b>grid</b>` +
+        ` <span class="dim">·</span> <span class="key">cells</span>: <b>${CONFIG.gridCols * CONFIG.gridRows}</b>`;
+
+  const graphLabel = isRoadGraphActive() ? "roads" : CONFIG.graph === "roads" ? "roads (loading)" : "grid";
 
   const statsLine =
     `<span class="key">path</span>: <b>${Math.round(lastPathLengthMeters)}</b>m` +
     ` <span class="dim">·</span> ${graphStats}` +
+    ` <span class="dim">·</span> <span class="key">roads pts</span>: <b>${roadsPointCache.points.length}</b>` +
     ` <span class="dim">·</span> <span class="key">endpointMode</span>: <b>${CONFIG.endpointMode}</b>` +
     soakLine;
 
@@ -1207,7 +1251,7 @@ function render(now) {
       ` roads=<b>${showRoads ? 1 : 0}</b>`;
 
     hud.innerHTML =
-      `<b>A*</b> Greater Boston <span class="dim">· graph=${graphLabel} · cycle ${cycle}</span><br/>` +
+      `<b>A*</b> Greater Boston <span class="dim">· graph ${graphLabel} · cycle ${cycle}</span><br/>` +
       `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
       `${samplingLine}<br/>` +
       `${statsLine}<br/>` +
