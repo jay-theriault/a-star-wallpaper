@@ -33,8 +33,20 @@ function parseOutputPathFromArgs(args) {
   return null;
 }
 
+function expandBounds(bounds, marginDeg = 0.15) {
+  return {
+    north: bounds.north + marginDeg,
+    south: bounds.south - marginDeg,
+    west: bounds.west - marginDeg,
+    east: bounds.east + marginDeg,
+  };
+}
+
 function buildQuery(bounds) {
-  const { south, west, north, east } = bounds;
+  // Expand query bounds so we still fetch polygons/relations whose geometry crosses the box.
+  // (Boston Harbor/sea surfaces often extend beyond our display bbox.)
+  const q = expandBounds(bounds, 0.15);
+  const { south, west, north, east } = q;
 
   // We only need water for the current rendering strategy.
   // Important: Boston Harbor and other large water bodies are often modeled as multipolygon relations.
