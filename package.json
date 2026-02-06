@@ -2,6 +2,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "build:dist": "node scripts/build-dist.js"
+    "build:dist": "node scripts/build-dist.js",
+    "build:road-graph": "node scripts/build-road-graph-cache.js"
   }
 }

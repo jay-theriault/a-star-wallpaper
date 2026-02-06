@@ -99,7 +99,12 @@ The road layer prefers a compact JSON cache if present, then falls back to GeoJS
 - `data/osm/roads.compact.json` (compact, faster to load)
 - `data/osm/roads.geojson` (GeoJSON fallback)
 
-To refresh it (dev step only), run:
+A precomputed **road graph cache** is optional but recommended for faster startup:
+- `data/osm/roadGraph.v1.json` (versioned graph cache)
+
+If the graph cache exists, runtime loads it; otherwise it builds from road lines on the fly.
+
+To refresh road files (dev step only), run:
 
 ```bash
 # default GeoJSON (Overpass fetch)
@@ -107,6 +112,17 @@ node scripts/fetch-osm-roads.js
 
 # compact format
 node scripts/fetch-osm-roads.js --format=compact
+```
+
+To build the road graph cache:
+
+```bash
+node scripts/build-road-graph-cache.js
+# Optional:
+# --input=data/osm/roads.compact.json
+# --output=data/osm/roadGraph.v1.json
+# --snapMeters=3
+# --quantizeDegrees=0.00005
 ```
 
 ---
