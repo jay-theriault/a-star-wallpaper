@@ -55,6 +55,7 @@ function clamp(v, lo, hi) {
 //   - showPathDuringSearch: 0|1 (default 0)
 //   - showRoads: 0|1 (default 1)
 //   - showLand: 0|1 (default 1)
+//   - roadsDetail: int [0,100] (default 70) (UI slider when HUD is enabled)
 //   - maxStepsPerFrame: int [1, 500] (default 60)
 //   - endpointMode: roads|random (default roads)
 //   - graph: roads|grid (default roads)
@@ -100,6 +101,7 @@ export const DEFAULT_CONFIG = {
   showPathDuringSearch: 0,
   showRoads: 1,
   showLand: 1,
+  roadsDetail: 70,
   endpointMode: "roads",
   graph: "roads",
   soak: 0,
@@ -117,6 +119,7 @@ const PRESET_CONFIG = {
     showPathDuringSearch: 0,
     showRoads: 1,
     showLand: 1,
+    roadsDetail: 70,
   },
   debug: {
     stepsPerSecond: 45,
@@ -129,6 +132,7 @@ const PRESET_CONFIG = {
     showPathDuringSearch: 1,
     showRoads: 1,
     showLand: 1,
+    roadsDetail: 100,
   },
 };
 
@@ -177,6 +181,7 @@ export function parseRuntimeConfig(search) {
   const endpointMode = readEnum("endpointMode", base.endpointMode, new Set(["roads", "random"]));
   const graph = readEnum("graph", base.graph, new Set(["roads", "grid"]));
   const soak = read01("soak", base.soak);
+  const roadsDetail = readInt("roadsDetail", base.roadsDetail, 0, 100);
 
   // End animation timing
   // - Legacy endAnimMs is still supported.
@@ -197,6 +202,7 @@ export function parseRuntimeConfig(search) {
     endpointMode,
     graph,
     soak,
+    roadsDetail,
     endHoldMs: readInt("endHoldMs", base.endHoldMs, 0, 60000),
     endAnimMs,
     endTraceMs,
@@ -222,6 +228,9 @@ const MAX_RENDER_NODES_PER_FRAME = 5200;
 // With zoomed-in defaults we can afford a higher ceiling, but we still keep a cap
 // to avoid locking up weaker machines.
 const MAX_ROAD_SEGMENTS = 300000;
+const MIN_ROAD_SEGMENTS = 60000;
+const MAX_SEGMENTS_PER_LINE_HI = 1800;
+const MAX_SEGMENTS_PER_LINE_LO = 500;
 const ROAD_POINT_STRIDE = 2;
 const MAX_ROAD_POINTS = 7000;
 
@@ -371,6 +380,7 @@ if (typeof window !== "undefined") {
 const canvas = document.getElementById("c");
 const hud = document.getElementById("hud");
 const help = document.getElementById("help");
+const controls = document.getElementById("controls");
 const ctx = canvas.getContext("2d", { alpha: false });
 
 const ROADS_GEO_URL = "./data/osm/roads.geojson";
@@ -394,6 +404,7 @@ let roadGraph = null;
 let roadGraphReady = false;
 let showRoads = CONFIG.showRoads;
 let showLand = CONFIG.showLand;
+let roadsDetail = CONFIG.roadsDetail;
 
 let helpVisible = false;
 
@@ -404,6 +415,41 @@ if (hud && CONFIG.hud === 0) {
 if (help) {
   help.style.display = "none";
 }
+
+if (controls && CONFIG.hud === 0) {
+  controls.style.display = "none";
+}
+
+function rebuildRoadsLayerSoon() {
+  if (!roadsReady) return;
+  buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+}
+
+function initControls() {
+  if (!controls || CONFIG.hud === 0) return;
+
+  controls.innerHTML =
+    `<div><b>Road detail</b> <span class="dim">(coverage vs fidelity)</span></div>` +
+    `<div style="display:flex;align-items:center;gap:10px;margin-top:6px;">` +
+    `<input id="roadsDetail" type="range" min="0" max="100" step="1" value="${roadsDetail}" />` +
+    `<span class="key" id="roadsDetailVal">${roadsDetail}</span>` +
+    `</div>`;
+
+  const slider = controls.querySelector("#roadsDetail");
+  const label = controls.querySelector("#roadsDetailVal");
+  if (slider) {
+    slider.addEventListener("input", () => {
+      const v = Number.parseInt(slider.value, 10);
+      if (!Number.isFinite(v)) return;
+      roadsDetail = clamp(v, 0, 100);
+      if (label) label.textContent = String(roadsDetail);
+      rebuildRoadsLayerSoon();
+      requestAnimationFrame(render);
+    });
+  }
+}
+
+initControls();
 
 // Background layers cached into offscreen canvases (rebuilt on resize).
 const bg = document.createElement("canvas");
@@ -984,9 +1030,12 @@ function buildRoadsLayer(rctx, w, h) {
   rctx.lineCap = "round";
   rctx.lineJoin = "round";
 
+  const t = roadsDetail / 100;
+  const effectiveMaxSegments = Math.round(MIN_ROAD_SEGMENTS + t * (MAX_ROAD_SEGMENTS - MIN_ROAD_SEGMENTS));
+
   // Goal: avoid a single very-long polyline consuming the entire segment budget.
   // We downsample long lines so we draw (at least) a little bit of everything.
-  const MAX_SEGMENTS_PER_LINE = 1600;
+  const MAX_SEGMENTS_PER_LINE = Math.round(MAX_SEGMENTS_PER_LINE_LO + t * (MAX_SEGMENTS_PER_LINE_HI - MAX_SEGMENTS_PER_LINE_LO));
 
   // Prioritize major roads first so if we hit the budget, the "shape" of the map is still there.
   const ordered = [...roadsLinesMeta].sort((a, b) => {
@@ -1002,7 +1051,7 @@ function buildRoadsLayer(rctx, w, h) {
   for (const item of ordered) {
     const line = item?.coords;
     if (!line || line.length < 2) continue;
-    if (segments >= MAX_ROAD_SEGMENTS) break;
+    if (segments >= effectiveMaxSegments) break;
 
     const stride = line.length > MAX_SEGMENTS_PER_LINE ? Math.ceil(line.length / MAX_SEGMENTS_PER_LINE) : 1;
 
@@ -1020,7 +1069,7 @@ function buildRoadsLayer(rctx, w, h) {
       }
 
       segments += 1;
-      if (segments >= MAX_ROAD_SEGMENTS) break;
+      if (segments >= effectiveMaxSegments) break;
     }
 
     rctx.stroke();
