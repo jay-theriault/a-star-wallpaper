@@ -1,4 +1,5 @@
 import { haversineMeters, makeAStarStepper, reconstructPath } from "./astar.js";
+import { DEFAULT_GUARDRAILS, updateGuardrails } from "./guardrails.js";
 
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
@@ -48,6 +49,7 @@ function clamp(v, lo, hi) {
 //   - maxStepsPerFrame: int [1, 500] (default 60)
 //   - endpointMode: roads|random (default roads)
 //   - showHud: 0|1 (alias for hud)
+//   - soak: 0|1 (default 0)
 
 const DEFAULT_CONFIG = {
   stepsPerSecond: 20,
@@ -82,6 +84,7 @@ const DEFAULT_CONFIG = {
   showPathDuringSearch: 0,
   showRoads: 1,
   endpointMode: "roads",
+  soak: 0,
 };
 
 function parseRuntimeConfig(search) {
@@ -122,6 +125,7 @@ function parseRuntimeConfig(search) {
 
   const hud = read01("hud", read01("showHud", DEFAULT_CONFIG.hud));
   const endpointMode = readEnum("endpointMode", DEFAULT_CONFIG.endpointMode, new Set(["roads", "random"]));
+  const soak = read01("soak", DEFAULT_CONFIG.soak);
 
   return {
     ...DEFAULT_CONFIG,
@@ -132,6 +136,7 @@ function parseRuntimeConfig(search) {
     zoom: readFloat("zoom", DEFAULT_CONFIG.zoom, 0.5, 2.0),
     hud,
     endpointMode,
+    soak,
     endHoldMs: readInt("endHoldMs", DEFAULT_CONFIG.endHoldMs, 0, 60000),
     endAnimMs: readInt("endAnimMs", DEFAULT_CONFIG.endAnimMs, 0, 60000),
     minStartEndMeters: readInt("minStartEndMeters", DEFAULT_CONFIG.minStartEndMeters, 0, 200000),
@@ -479,6 +484,24 @@ let endpointSamplingDistanceMeters = 0;
 let endpointSamplingTries = 0;
 let lastPathLengthMeters = 0;
 
+const GUARDRAILS = DEFAULT_GUARDRAILS;
+let guardrailState = {
+  consecutiveFailures: 0,
+  consecutiveResamples: 0,
+  relaxCyclesRemaining: 0,
+};
+
+let effectiveMinStartEndMeters = CONFIG.minStartEndMeters;
+let effectiveDiscardIfPathLeavesBounds = CONFIG.discardIfPathLeavesBounds;
+
+let soakStats = {
+  cyclesCompleted: 0,
+  failures: 0,
+  resamples: 0,
+  totalSteps: 0,
+  totalSearchMs: 0,
+};
+
 function pickEndpoints() {
   simBounds = applyZoom(BOUNDS, CONFIG.zoom);
 
@@ -500,9 +523,15 @@ function pickEndpoints() {
     return k;
   };
 
+  const relaxed = CONFIG.soak !== 0 && guardrailState.relaxCyclesRemaining > 0;
+  effectiveMinStartEndMeters = relaxed
+    ? Math.min(CONFIG.minStartEndMeters, GUARDRAILS.relaxedMinStartEndMeters)
+    : CONFIG.minStartEndMeters;
+  effectiveDiscardIfPathLeavesBounds = relaxed ? false : CONFIG.discardIfPathLeavesBounds;
+
   const sampled = sampleEndpointPair({
     maxTries: ENDPOINT_SAMPLING_MAX_TRIES,
-    minMeters: CONFIG.minStartEndMeters,
+    minMeters: effectiveMinStartEndMeters,
     randomKey,
     toLatLon: (k) => cellLatLon(...Object.values(parseKey(k)), simBounds),
   });
@@ -527,6 +556,10 @@ function pickEndpoints() {
   phaseT = 0;
   lastStepAt = performance.now();
   cycle += 1;
+
+  if (CONFIG.soak !== 0 && guardrailState.relaxCyclesRemaining > 0) {
+    guardrailState.relaxCyclesRemaining -= 1;
+  }
 }
 
 pickEndpoints();
@@ -944,10 +977,19 @@ function render(now) {
     `sample: <b>${Math.round(endpointSamplingDistanceMeters)}</b>m <span class="dim">·</span> tries: <b>${endpointSamplingTries}</b>` +
     (endpointSamplingBestEffort ? ` <span class="dim">·</span> <b style="color:#fb7185">min-distance not met; best-effort</b>` : "");
 
+  const avgSps = soakStats.totalSearchMs > 0 ? soakStats.totalSteps / (soakStats.totalSearchMs / 1000) : 0;
+  const soakLine =
+    CONFIG.soak !== 0
+      ? ` <span class="dim">·</span> <span class="key">soak</span>: cycles=<b>${soakStats.cyclesCompleted}</b> fail=<b>${soakStats.failures}</b> resamp=<b>${soakStats.resamples}</b> avgSPS=<b>${avgSps.toFixed(1)}</b>` +
+        ` <span class="dim">·</span> gr(f=${guardrailState.consecutiveFailures},r=${guardrailState.consecutiveResamples},relax=${guardrailState.relaxCyclesRemaining})` +
+        (guardrailState.relaxCyclesRemaining > 0 ? ` <b style="color:#fbbf24">RELAXED</b>` : "")
+      : "";
+
   const statsLine =
     `<span class="key">path</span>: <b>${Math.round(lastPathLengthMeters)}</b>m` +
     ` <span class="dim">·</span> <span class="key">roads pts</span>: <b>${roadsPointCache.points.length}</b>` +
-    ` <span class="dim">·</span> <span class="key">endpointMode</span>: <b>${CONFIG.endpointMode}</b>`;
+    ` <span class="dim">·</span> <span class="key">endpointMode</span>: <b>${CONFIG.endpointMode}</b>` +
+    soakLine;
 
   if (hud && CONFIG.hud !== 0) {
     const openClosedLine =
@@ -992,10 +1034,24 @@ function tick(now) {
       if (r.done) {
         if (r.status === "found") {
           // optional bounds enforcement
-          if (CONFIG.discardIfPathLeavesBounds && pathLeavesBounds(r.path, simBounds)) {
+          if (effectiveDiscardIfPathLeavesBounds && pathLeavesBounds(r.path, simBounds)) {
+            if (CONFIG.soak !== 0) {
+              soakStats.resamples += 1;
+              const u = updateGuardrails(guardrailState, "resample", GUARDRAILS);
+              guardrailState = u.state;
+            }
             pickEndpoints();
             requestAnimationFrame(render);
             return;
+          }
+
+          if (CONFIG.soak !== 0) {
+            const searchMs = performance.now() - lastStepAt;
+            soakStats.cyclesCompleted += 1;
+            soakStats.totalSteps += r.steps ?? 0;
+            soakStats.totalSearchMs += Math.max(0, searchMs);
+            const u = updateGuardrails(guardrailState, "success", GUARDRAILS);
+            guardrailState = u.state;
           }
 
           finalPath = r.path;
@@ -1004,6 +1060,11 @@ function tick(now) {
           phaseT = 0;
         } else {
           // no path — resample
+          if (CONFIG.soak !== 0) {
+            soakStats.failures += 1;
+            const u = updateGuardrails(guardrailState, "failure", GUARDRAILS);
+            guardrailState = u.state;
+          }
           pickEndpoints();
         }
         break;
