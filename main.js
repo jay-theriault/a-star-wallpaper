@@ -59,6 +59,8 @@ function clamp(v, lo, hi) {
 //   - showRoads: 0|1 (default 1)
 //   - showLand: 0|1 (default 1)
 //   - roadsDetail: int [0,100] (default 70) (UI slider when HUD is enabled)
+//   - seed: string|int (deterministic endpoints)
+//   - centerLat / centerLon: float (override bbox center)
 //   - maxStepsPerFrame: int [1, 500] (default 60)
 //   - endpointMode: roads|random (default roads)
 //   - graph: roads|grid (default roads)
@@ -105,6 +107,11 @@ export const DEFAULT_CONFIG = {
   showRoads: 1,
   showLand: 1,
   roadsDetail: 70,
+  // Determinism + viewport control
+  seed: null,
+  centerLat: null,
+  centerLon: null,
+
   endpointMode: "roads",
   graph: "roads",
   soak: 0,
@@ -186,6 +193,14 @@ export function parseRuntimeConfig(search) {
   const soak = read01("soak", base.soak);
   const roadsDetail = readInt("roadsDetail", base.roadsDetail, 0, 100);
 
+  const seed = params.get("seed") ?? base.seed;
+  const centerLatRaw = params.get("centerLat");
+  const centerLonRaw = params.get("centerLon");
+  const centerLat = centerLatRaw == null ? base.centerLat : Number.parseFloat(centerLatRaw);
+  const centerLon = centerLonRaw == null ? base.centerLon : Number.parseFloat(centerLonRaw);
+  const centerLatOk = Number.isFinite(centerLat);
+  const centerLonOk = Number.isFinite(centerLon);
+
   // End animation timing
   // - Legacy endAnimMs is still supported.
   // - If endTraceMs/endGlowMs not provided, split endAnimMs 60/40 by default.
@@ -206,6 +221,9 @@ export function parseRuntimeConfig(search) {
     graph,
     soak,
     roadsDetail,
+    seed,
+    centerLat: centerLatOk ? centerLat : null,
+    centerLon: centerLonOk ? centerLon : null,
     endHoldMs: readInt("endHoldMs", base.endHoldMs, 0, 60000),
     endAnimMs,
     endTraceMs,
@@ -221,6 +239,8 @@ export function parseRuntimeConfig(search) {
 }
 
 const CONFIG = parseRuntimeConfig(typeof window !== "undefined" ? window.location?.search : "");
+const CENTER_OVERRIDE =
+  CONFIG.centerLat != null && CONFIG.centerLon != null ? { lat: CONFIG.centerLat, lon: CONFIG.centerLon } : null;
 
 // --- Endpoint sampling ---
 export const ENDPOINT_SAMPLING_MAX_TRIES = 5000;
@@ -514,8 +534,8 @@ function bboxCenter(bounds) {
   };
 }
 
-function applyZoom(bounds, zoom) {
-  const c = bboxCenter(bounds);
+function applyZoom(bounds, zoom, centerOverride = null) {
+  const c = centerOverride || bboxCenter(bounds);
   const latSpan = (bounds.north - bounds.south) / zoom;
   const lonSpan = (bounds.east - bounds.west) / zoom;
   return {
@@ -615,6 +635,28 @@ function randomRoadKey(rng = Math.random) {
   return roadsPointCache.keys[Math.floor(rng() * roadsPointCache.keys.length)];
 }
 
+function hashSeedToUint32(seed) {
+  const s = String(seed ?? "");
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(a) {
+  return function () {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const RNG = CONFIG.seed != null ? mulberry32(hashSeedToUint32(CONFIG.seed)) : Math.random;
+
 function isRoadGraphActive() {
   return CONFIG.graph === "roads" && roadGraphReady && roadGraph?.nodes?.length > 0;
 }
@@ -683,7 +725,7 @@ function pathLengthMeters(pathKeys, bounds) {
 
 // --- Simulation state ---
 // simBounds affects sampling + A* costs/heuristics only.
-let simBounds = applyZoom(BOUNDS, CONFIG.zoom);
+let simBounds = applyZoom(BOUNDS, CONFIG.zoom, CENTER_OVERRIDE);
 let startKey = null;
 let goalKey = null;
 let stepper = null;
@@ -718,7 +760,7 @@ let soakStats = {
 };
 
 function pickEndpoints() {
-  simBounds = applyZoom(BOUNDS, CONFIG.zoom);
+  simBounds = applyZoom(BOUNDS, CONFIG.zoom, CENTER_OVERRIDE);
 
   const useRoadGraph = isRoadGraphActive();
   const useRoadKeys = CONFIG.endpointMode === "roads" && roadsPointCache.keys.length > 0;
@@ -749,7 +791,7 @@ function pickEndpoints() {
   const sampled = sampleEndpointPair({
     maxTries: ENDPOINT_SAMPLING_MAX_TRIES,
     minMeters: effectiveMinStartEndMeters,
-    randomKey,
+    randomKey: (rng) => randomKey(rng || RNG),
     toLatLon: (k) => keyToLatLon(k, simBounds),
   });
 
@@ -951,7 +993,7 @@ function buildLandLayer(lctx, w, h) {
 
 // --- OSM roads layer ---
 async function loadRoads() {
-  const cacheBounds = applyZoom(BOUNDS, CONFIG.zoom);
+  const cacheBounds = applyZoom(BOUNDS, CONFIG.zoom, CENTER_OVERRIDE);
 
   // 1) Try to load a precomputed road graph cache (dev-time generated).
   try {
