@@ -14,6 +14,7 @@ const THEME = {
   grid: "rgba(255,255,255,0.035)",
   road: "rgba(210,225,255,0.055)",
   roadDash: "rgba(255,255,255,0.08)",
+  osmRoad: "rgba(90,100,110,0.45)",
 
   // Tuned for legibility on dark background (open/closed/current are distinct).
   open: "#22d3ee", // cyan
@@ -43,6 +44,7 @@ function clamp(v, lo, hi) {
 //   - showOpenClosed: 0|1 (default 1)
 //   - showCurrent: 0|1 (default 1)
 //   - showPathDuringSearch: 0|1 (default 0)
+//   - showRoads: 0|1 (default 1)
 //   - maxStepsPerFrame: int [1, 500] (default 60)
 
 const DEFAULT_CONFIG = {
@@ -76,6 +78,7 @@ const DEFAULT_CONFIG = {
   showOpenClosed: 1,
   showCurrent: 1,
   showPathDuringSearch: 0,
+  showRoads: 1,
 };
 
 function parseRuntimeConfig(search) {
@@ -123,6 +126,7 @@ function parseRuntimeConfig(search) {
     showOpenClosed: read01("showOpenClosed", DEFAULT_CONFIG.showOpenClosed),
     showCurrent: read01("showCurrent", DEFAULT_CONFIG.showCurrent),
     showPathDuringSearch: read01("showPathDuringSearch", DEFAULT_CONFIG.showPathDuringSearch),
+    showRoads: read01("showRoads", DEFAULT_CONFIG.showRoads),
   };
 }
 
@@ -170,6 +174,13 @@ const canvas = document.getElementById("c");
 const hud = document.getElementById("hud");
 const ctx = canvas.getContext("2d", { alpha: false });
 
+const ROADS_URL = "./data/osm/roads.geojson";
+const roadsLayer = document.createElement("canvas");
+const roadsCtx = roadsLayer.getContext("2d", { alpha: true });
+let roadsLines = [];
+let roadsReady = false;
+let showRoads = CONFIG.showRoads;
+
 if (hud && CONFIG.hud === 0) {
   hud.style.display = "none";
 }
@@ -196,9 +207,21 @@ function resize() {
   buildBackground(bgCtx, bg.width, bg.height);
 
   buildNoise(noiseCtx);
+
+  roadsLayer.width = Math.max(1, Math.floor(window.innerWidth));
+  roadsLayer.height = Math.max(1, Math.floor(window.innerHeight));
+  if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
 }
 window.addEventListener("resize", resize);
 resize();
+
+window.addEventListener("keydown", (e) => {
+  if (e.key?.toLowerCase() === "r") {
+    showRoads = showRoads ? 0 : 1;
+  }
+});
+
+loadRoads();
 
 // --- Coordinate helpers ---
 function bboxCenter(bounds) {
@@ -417,64 +440,6 @@ function buildBackground(bctx, w, h) {
   }
   bctx.restore();
 
-  // Road-like network: curvy arterials + lighter minor streets.
-  const drawRoad = ({ x0, y0, x1, y1, width, alpha, dash }) => {
-    const cx0 = x0 + (x1 - x0) * (0.30 + 0.10 * (Math.random() - 0.5));
-    const cy0 = y0 + (y1 - y0) * (0.30 + CONFIG.roadCurviness * (Math.random() - 0.5)) * 220;
-    const cx1 = x0 + (x1 - x0) * (0.70 + 0.10 * (Math.random() - 0.5));
-    const cy1 = y0 + (y1 - y0) * (0.70 + CONFIG.roadCurviness * (Math.random() - 0.5)) * 220;
-
-    bctx.save();
-    bctx.globalAlpha = alpha;
-    bctx.lineCap = "round";
-    bctx.lineJoin = "round";
-
-    // Asphalt body (soft).
-    bctx.strokeStyle = THEME.road;
-    bctx.lineWidth = width;
-    bctx.shadowColor = "rgba(0,0,0,0.45)";
-    bctx.shadowBlur = 10;
-    bctx.beginPath();
-    bctx.moveTo(x0, y0);
-    bctx.bezierCurveTo(cx0, cy0, cx1, cy1, x1, y1);
-    bctx.stroke();
-
-    if (dash) {
-      // Center dash.
-      bctx.shadowBlur = 0;
-      bctx.setLineDash([10, 12]);
-      bctx.lineDashOffset = Math.random() * 22;
-      bctx.strokeStyle = THEME.roadDash;
-      bctx.lineWidth = Math.max(1, width * 0.12);
-      bctx.beginPath();
-      bctx.moveTo(x0, y0);
-      bctx.bezierCurveTo(cx0, cy0, cx1, cy1, x1, y1);
-      bctx.stroke();
-    }
-    bctx.restore();
-  };
-
-  const randEdgePoint = () => {
-    const side = (Math.random() * 4) | 0;
-    if (side === 0) return { x: -30, y: Math.random() * h };
-    if (side === 1) return { x: w + 30, y: Math.random() * h };
-    if (side === 2) return { x: Math.random() * w, y: -30 };
-    return { x: Math.random() * w, y: h + 30 };
-  };
-
-  // Major roads.
-  for (let i = 0; i < CONFIG.roadMajorCount; i++) {
-    const a = randEdgePoint();
-    const b = randEdgePoint();
-    drawRoad({ x0: a.x, y0: a.y, x1: b.x, y1: b.y, width: 14 + 12 * Math.random(), alpha: 0.38, dash: true });
-  }
-
-  // Minor roads.
-  for (let i = 0; i < CONFIG.roadMinorCount; i++) {
-    const a = { x: Math.random() * w, y: Math.random() * h };
-    const b = randEdgePoint();
-    drawRoad({ x0: a.x, y0: a.y, x1: b.x, y1: b.y, width: 6 + 6 * Math.random(), alpha: 0.22, dash: false });
-  }
 
   // Subtle grid on top.
   bctx.save();
@@ -507,6 +472,63 @@ function buildBackground(bctx, w, h) {
   bctx.fillStyle = vg;
   bctx.fillRect(0, 0, w, h);
   bctx.restore();
+}
+
+// --- OSM roads layer ---
+function extractRoadLines(geojson) {
+  const lines = [];
+  if (!geojson || geojson.type !== "FeatureCollection" || !Array.isArray(geojson.features)) return lines;
+
+  for (const feature of geojson.features) {
+    const geom = feature?.geometry;
+    if (!geom) continue;
+    if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
+      lines.push(geom.coordinates);
+    } else if (geom.type === "MultiLineString" && Array.isArray(geom.coordinates)) {
+      for (const line of geom.coordinates) {
+        if (Array.isArray(line)) lines.push(line);
+      }
+    }
+  }
+
+  return lines;
+}
+
+async function loadRoads() {
+  try {
+    const res = await fetch(ROADS_URL);
+    if (!res.ok) throw new Error(`roads fetch failed: ${res.status}`);
+    const geojson = await res.json();
+    roadsLines = extractRoadLines(geojson);
+    roadsReady = roadsLines.length > 0;
+    if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+  } catch (err) {
+    console.warn("Failed to load roads layer", err);
+  }
+}
+
+function buildRoadsLayer(rctx, w, h) {
+  if (!roadsLines.length) return;
+  rctx.clearRect(0, 0, w, h);
+  rctx.save();
+  rctx.strokeStyle = THEME.osmRoad;
+  rctx.lineWidth = 1.0;
+  rctx.lineCap = "round";
+  rctx.lineJoin = "round";
+
+  for (const line of roadsLines) {
+    if (!line || line.length < 2) continue;
+    rctx.beginPath();
+    for (let i = 0; i < line.length; i++) {
+      const [lon, lat] = line[i];
+      const p = project(lat, lon, simBounds, w, h);
+      if (i === 0) rctx.moveTo(p.x, p.y);
+      else rctx.lineTo(p.x, p.y);
+    }
+    rctx.stroke();
+  }
+
+  rctx.restore();
 }
 
 function cellToXY(k, w, h) {
@@ -723,6 +745,10 @@ function render(now) {
   ctx.globalAlpha = 1;
   ctx.drawImage(bg, 0, 0, w, h);
 
+  if (showRoads && roadsReady) {
+    ctx.drawImage(roadsLayer, 0, 0, w, h);
+  }
+
   // Film grain.
   ctx.save();
   ctx.globalAlpha = CONFIG.noiseAlpha;
@@ -789,7 +815,8 @@ function render(now) {
       `<span class="dim">viz</span>:` +
       ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
       ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
-      ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>`;
+      ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
+      ` roads=<b>${showRoads ? 1 : 0}</b>`;
 
     hud.innerHTML =
       `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +

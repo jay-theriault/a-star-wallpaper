@@ -42,6 +42,7 @@ All params are **optional**. Out-of-range values are **clamped**; non-numeric/in
 - `showOpenClosed`: **0|1** (default **1**)
 - `showCurrent`: **0|1** (default **1**)
 - `showPathDuringSearch`: **0|1** (default **0**)
+- `showRoads`: **0|1** (default **1**)
 - `endHoldMs`: int **[0, 60000]** (default: whatever `main.js` ships with)
 - `endAnimMs`: int **[0, 60000]** (default: whatever `main.js` ships with)
 - `minStartEndMeters`: int **[0, 200000]** (default: whatever `main.js` ships with)
@@ -55,6 +56,8 @@ All params are **optional**. Out-of-range values are **clamped**; non-numeric/in
 
 3) Show a faint "path hint" during the search (useful for debugging):
 - `index.html?showPathDuringSearch=1&sps=25&zoom=1.1`
+
+Tip: press **R** to toggle the roads layer at runtime.
 
 ### Edit defaults
 Open `main.js` and adjust `DEFAULT_CONFIG` (or other constants) to change the shipped defaults.
@@ -77,8 +80,16 @@ python -m http.server 8000
 - `main.js` — rendering + animation loop + configuration
 - `astar.js` — A* implementation and helpers
 
+### OSM roads data
+The road layer is loaded from a cached GeoJSON file in `data/osm/roads.geojson`.
+To refresh it (dev step only), run:
+
+```bash
+node scripts/fetch-osm-roads.js
+```
+
 ---
 
 ## Notes / roadmap
 - Current graph is a **regular grid** (prototype).
-- Road-network / OSM integration is a later step.
+- Road network layer uses cached OSM data (see above).
