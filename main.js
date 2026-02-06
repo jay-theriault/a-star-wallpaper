@@ -89,7 +89,9 @@ export const DEFAULT_CONFIG = {
 
   minStartEndMeters: 7000,
   discardIfPathLeavesBounds: true,
-  zoom: 1.0,
+  // Default to a much tighter view so we don't blow past render budgets on OSM data.
+  // (Area scales ~1/zoom^2, so zoom=5 is ~1/25th the area of zoom=1.)
+  zoom: 5.0,
   hud: 1,
 
   // viz toggles
