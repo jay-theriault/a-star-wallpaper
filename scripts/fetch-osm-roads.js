@@ -35,6 +35,24 @@ function parseBoundsFromArgs(args) {
   return out;
 }
 
+function parseFormatFromArgs(args) {
+  for (const arg of args) {
+    if (arg.startsWith("--format=")) {
+      const value = arg.split("=")[1];
+      if (value === "geojson" || value === "compact") return value;
+    }
+    if (arg === "--compact") return "compact";
+  }
+  return "geojson";
+}
+
+function parseOutputPathFromArgs(args) {
+  for (const arg of args) {
+    if (arg.startsWith("--out=")) return arg.split("=")[1];
+  }
+  return null;
+}
+
 function buildQuery(bounds) {
   const { south, west, north, east } = bounds;
   return `[
@@ -64,13 +82,13 @@ function simplifyLine(coords, minDelta = 0.00005) {
   return out;
 }
 
-function toFeatureCollection(osm) {
+function collectLines(osm) {
   const nodes = new Map();
   for (const el of osm.elements) {
     if (el.type === "node") nodes.set(el.id, [el.lon, el.lat]);
   }
 
-  const features = [];
+  const lines = [];
   for (const el of osm.elements) {
     if (el.type !== "way") continue;
     const highway = el.tags?.highway;
@@ -86,27 +104,43 @@ function toFeatureCollection(osm) {
     const simplified = simplifyLine(coords);
     if (simplified.length < 2) continue;
 
-    features.push({
+    lines.push({ id: el.id, highway, coords: simplified });
+  }
+
+  return lines;
+}
+
+function toFeatureCollection(lines) {
+  return {
+    type: "FeatureCollection",
+    features: lines.map((line) => ({
       type: "Feature",
       properties: {
-        id: el.id,
-        highway,
+        id: line.id,
+        highway: line.highway,
       },
       geometry: {
         type: "LineString",
-        coordinates: simplified,
+        coordinates: line.coords,
       },
-    });
-  }
+    })),
+  };
+}
 
+function toCompactFormat(lines, bounds) {
   return {
-    type: "FeatureCollection",
-    features,
+    format: "osm-roads-compact",
+    version: 1,
+    bounds,
+    lines: lines.map((line) => line.coords.flat()),
   };
 }
 
 async function main() {
-  const bounds = parseBoundsFromArgs(process.argv.slice(2));
+  const args = process.argv.slice(2);
+  const bounds = parseBoundsFromArgs(args);
+  const format = parseFormatFromArgs(args);
+  const outOverride = parseOutputPathFromArgs(args);
   const query = buildQuery(bounds);
 
   const res = await fetch(OVERPASS_URL, {
@@ -124,12 +158,21 @@ async function main() {
   const osm = await res.json();
   if (!osm?.elements) throw new Error("Invalid Overpass response");
 
-  const fc = toFeatureCollection(osm);
-  const outPath = path.resolve("data/osm/roads.geojson");
+  const lines = collectLines(osm);
+  const outPath = path.resolve(
+    outOverride || (format === "compact" ? "data/osm/roads.compact.json" : "data/osm/roads.geojson"),
+  );
   await fs.mkdir(path.dirname(outPath), { recursive: true });
-  await fs.writeFile(outPath, JSON.stringify(fc));
 
-  console.log(`Wrote ${fc.features.length} road features to ${outPath}`);
+  if (format === "compact") {
+    const compact = toCompactFormat(lines, bounds);
+    await fs.writeFile(outPath, JSON.stringify(compact));
+    console.log(`Wrote ${compact.lines.length} road lines to ${outPath}`);
+  } else {
+    const fc = toFeatureCollection(lines);
+    await fs.writeFile(outPath, JSON.stringify(fc));
+    console.log(`Wrote ${fc.features.length} road features to ${outPath}`);
+  }
 }
 
 main().catch((err) => {
