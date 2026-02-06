@@ -1,5 +1,6 @@
 import { haversineMeters, makeAStarStepper, reconstructPath } from "./astar.js";
 import { DEFAULT_GUARDRAILS, updateGuardrails } from "./guardrails.js";
+import { stepEndPhase } from "./endPhase.js";
 
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
@@ -41,7 +42,9 @@ function clamp(v, lo, hi) {
 //   - zoom: float [0.5, 2.0]
 //   - hud: 0|1
 //   - endHoldMs: int [0, 60000]
-//   - endAnimMs: int [0, 60000]
+//   - endAnimMs: int [0, 60000] (legacy total; split into trace+glow)
+//   - endTraceMs: int [0, 60000]
+//   - endGlowMs: int [0, 60000]
 //   - minStartEndMeters: int [0, 200000]
 //   - showOpenClosed: 0|1 (default 1)
 //   - showCurrent: 0|1 (default 1)
@@ -58,7 +61,11 @@ export const DEFAULT_CONFIG = {
 
   // hold after finding the path
   endHoldMs: 1800,
+  // legacy total anim duration (kept for compatibility)
   endAnimMs: 1200,
+  // end animation breakdown (trace + glow)
+  endTraceMs: 720,
+  endGlowMs: 480,
 
   // grid density (prototype)
   gridCols: 160,
@@ -158,6 +165,13 @@ export function parseRuntimeConfig(search) {
   const endpointMode = readEnum("endpointMode", base.endpointMode, new Set(["roads", "random"]));
   const soak = read01("soak", base.soak);
 
+  // End animation timing
+  // - Legacy endAnimMs is still supported.
+  // - If endTraceMs/endGlowMs not provided, split endAnimMs 60/40 by default.
+  const endAnimMs = readInt("endAnimMs", base.endAnimMs, 0, 60000);
+  const endTraceMs = readInt("endTraceMs", Math.round(endAnimMs * 0.6), 0, 60000);
+  const endGlowMs = readInt("endGlowMs", Math.max(0, endAnimMs - endTraceMs), 0, 60000);
+
   return {
     ...base,
     mode,
@@ -170,7 +184,9 @@ export function parseRuntimeConfig(search) {
     endpointMode,
     soak,
     endHoldMs: readInt("endHoldMs", base.endHoldMs, 0, 60000),
-    endAnimMs: readInt("endAnimMs", base.endAnimMs, 0, 60000),
+    endAnimMs,
+    endTraceMs,
+    endGlowMs,
     minStartEndMeters: readInt("minStartEndMeters", base.minStartEndMeters, 0, 200000),
 
     showOpenClosed: read01("showOpenClosed", base.showOpenClosed),
@@ -519,9 +535,10 @@ let goalKey = null;
 let stepper = null;
 let currentStep = null;
 let finalPath = null;
-let phase = "search"; // search | end-hold | end-anim
+let phase = "search"; // search | end-hold | end-trace | end-glow
 let phaseT = 0;
 let lastStepAt = 0;
+let lastFrameAt = 0;
 let cycle = 0;
 let endpointSamplingBestEffort = false;
 let endpointSamplingDistanceMeters = 0;
@@ -599,6 +616,7 @@ function pickEndpoints() {
   phase = "search";
   phaseT = 0;
   lastStepAt = performance.now();
+  lastFrameAt = lastStepAt;
   cycle += 1;
 
   if (CONFIG.soak !== 0 && guardrailState.relaxCyclesRemaining > 0) {
@@ -875,6 +893,28 @@ function drawPath(keys, w, h, t01, glowPulse01 = 0) {
   ctx.restore();
 }
 
+function drawPathDot(keys, w, h, t01) {
+  if (!keys || keys.length < 2) return;
+  const clamped = clamp(t01, 0, 1);
+  const idx = Math.min(keys.length - 2, Math.floor(clamped * (keys.length - 1)));
+  const nextIdx = idx + 1;
+  const localT = clamped * (keys.length - 1) - idx;
+  const p0 = cellToXY(keys[idx], w, h);
+  const p1 = cellToXY(keys[nextIdx], w, h);
+  const x = p0.x + (p1.x - p0.x) * localT;
+  const y = p0.y + (p1.y - p0.y) * localT;
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.shadowColor = "rgba(255,255,255,0.75)";
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.beginPath();
+  ctx.arc(x, y, 3.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawMarker(k, w, h, fill, ring) {
   const p = cellToXY(k, w, h);
   ctx.save();
@@ -997,15 +1037,24 @@ function render(now) {
   if (finalPath) {
     if (phase === "end-hold") {
       drawPath(finalPath, w, h, 1.0, 0.1);
-    } else if (phase === "end-anim") {
-      const t01 = clamp(phaseT / CONFIG.endAnimMs, 0, 1);
+    } else if (phase === "end-trace") {
+      const t01 = CONFIG.endTraceMs > 0 ? clamp(phaseT / CONFIG.endTraceMs, 0, 1) : 1;
       const pulse = 0.5 - 0.5 * Math.cos(t01 * Math.PI * 2);
-      // Reveal + highlight head.
-      drawPath(finalPath, w, h, t01, pulse);
+      // Reveal + moving dot.
+      drawPath(finalPath, w, h, t01, pulse * 0.6);
+      drawPathDot(finalPath, w, h, t01);
       // subtle full path hint behind
       ctx.save();
-      ctx.globalAlpha = 0.22;
+      ctx.globalAlpha = 0.18;
       drawPath(finalPath, w, h, 1.0, 0.0);
+      ctx.restore();
+    } else if (phase === "end-glow") {
+      const t01 = CONFIG.endGlowMs > 0 ? clamp(phaseT / CONFIG.endGlowMs, 0, 1) : 1;
+      const pulse = 0.5 - 0.5 * Math.cos(t01 * Math.PI * 2);
+      const fade = 1 - t01;
+      ctx.save();
+      ctx.globalAlpha = fade;
+      drawPath(finalPath, w, h, 1.0, 0.6 + 0.8 * pulse);
       ctx.restore();
     }
   }
@@ -1089,6 +1138,8 @@ function render(now) {
 }
 
 function tick(now) {
+  const dt = Math.min(1000, Math.max(0, now - lastFrameAt));
+  lastFrameAt = now;
   // step A* at fixed rate (but allow multiple steps per frame when frames are slow)
   if (phase === "search") {
     let stepsThisFrame = 0;
@@ -1145,15 +1196,11 @@ function tick(now) {
     if (now - lastStepAt > CONFIG.stepDelayMs * CONFIG.maxStepsPerFrame) {
       lastStepAt = now;
     }
-  } else if (phase === "end-hold") {
-    phaseT += 16.67;
-    if (phaseT >= CONFIG.endHoldMs) {
-      phase = "end-anim";
-      phaseT = 0;
-    }
-  } else if (phase === "end-anim") {
-    phaseT += 16.67;
-    if (phaseT >= CONFIG.endAnimMs) {
+  } else if (phase === "end-hold" || phase === "end-trace" || phase === "end-glow") {
+    const next = stepEndPhase({ phase, phaseT }, dt, CONFIG);
+    phase = next.phase;
+    phaseT = next.phaseT;
+    if (next.done) {
       pickEndpoints();
     }
   }
