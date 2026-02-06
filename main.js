@@ -1,5 +1,4 @@
 import { haversineMeters, makeAStarStepper, reconstructPath } from "./astar.js";
-import { extractRoadLines } from "./roads-data.js";
 
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
@@ -47,6 +46,8 @@ function clamp(v, lo, hi) {
 //   - showPathDuringSearch: 0|1 (default 0)
 //   - showRoads: 0|1 (default 1)
 //   - maxStepsPerFrame: int [1, 500] (default 60)
+//   - endpointMode: roads|random (default roads)
+//   - showHud: 0|1 (alias for hud)
 
 const DEFAULT_CONFIG = {
   stepsPerSecond: 20,
@@ -80,6 +81,7 @@ const DEFAULT_CONFIG = {
   showCurrent: 1,
   showPathDuringSearch: 0,
   showRoads: 1,
+  endpointMode: "roads",
 };
 
 function parseRuntimeConfig(search) {
@@ -109,8 +111,17 @@ function parseRuntimeConfig(search) {
     return def01;
   };
 
+  const readEnum = (name, def, allowed) => {
+    const raw = params.get(name);
+    if (raw == null) return def;
+    return allowed.has(raw) ? raw : def;
+  };
+
   const stepsPerSecond = readInt("sps", DEFAULT_CONFIG.stepsPerSecond, 1, 120);
   const maxStepsPerFrame = readInt("maxStepsPerFrame", DEFAULT_CONFIG.maxStepsPerFrame, 1, 500);
+
+  const hud = read01("hud", read01("showHud", DEFAULT_CONFIG.hud));
+  const endpointMode = readEnum("endpointMode", DEFAULT_CONFIG.endpointMode, new Set(["roads", "random"]));
 
   return {
     ...DEFAULT_CONFIG,
@@ -119,7 +130,8 @@ function parseRuntimeConfig(search) {
     // use a delay to drive the fixed-rate stepping loop
     stepDelayMs: 1000 / stepsPerSecond,
     zoom: readFloat("zoom", DEFAULT_CONFIG.zoom, 0.5, 2.0),
-    hud: read01("hud", DEFAULT_CONFIG.hud),
+    hud,
+    endpointMode,
     endHoldMs: readInt("endHoldMs", DEFAULT_CONFIG.endHoldMs, 0, 60000),
     endAnimMs: readInt("endAnimMs", DEFAULT_CONFIG.endAnimMs, 0, 60000),
     minStartEndMeters: readInt("minStartEndMeters", DEFAULT_CONFIG.minStartEndMeters, 0, 200000),
@@ -135,6 +147,11 @@ const CONFIG = parseRuntimeConfig(typeof window !== "undefined" ? window.locatio
 
 // --- Endpoint sampling ---
 export const ENDPOINT_SAMPLING_MAX_TRIES = 5000;
+
+const MAX_RENDER_NODES_PER_SET = 3500;
+const MAX_ROAD_SEGMENTS = 120000;
+const ROAD_POINT_STRIDE = 2;
+const MAX_ROAD_POINTS = 7000;
 
 /**
  * Attempt to sample endpoints that satisfy `minMeters` for up to `maxTries`.
@@ -169,6 +186,97 @@ export function sampleEndpointPair({
   return best;
 }
 
+// --- Roads + grid helpers (shared with tests) ---
+function inBoundsLatLon(lat, lon, bounds) {
+  return lat <= bounds.north && lat >= bounds.south && lon >= bounds.west && lon <= bounds.east;
+}
+
+function key(i, j) {
+  return `${i},${j}`;
+}
+function parseKey(k) {
+  const [i, j] = k.split(",").map((n) => parseInt(n, 10));
+  return { i, j };
+}
+
+export function latLonToCellKey(lat, lon, bounds, cols = CONFIG.gridCols, rows = CONFIG.gridRows) {
+  if (!inBoundsLatLon(lat, lon, bounds)) return null;
+  const i = Math.floor(((lon - bounds.west) / (bounds.east - bounds.west)) * cols);
+  const j = Math.floor(((bounds.north - lat) / (bounds.north - bounds.south)) * rows);
+  if (i < 0 || j < 0 || i >= cols || j >= rows) return null;
+  return key(i, j);
+}
+
+export function snapLatLonToRoadPoint(lat, lon, roadPoints) {
+  if (!roadPoints || roadPoints.length === 0) return null;
+  let best = null;
+  let bestD = Infinity;
+  for (const p of roadPoints) {
+    const d = (p.lat - lat) * (p.lat - lat) + (p.lon - lon) * (p.lon - lon);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best;
+}
+
+function extractRoadLines(geojson) {
+  const lines = [];
+  if (!geojson || geojson.type !== "FeatureCollection" || !Array.isArray(geojson.features)) return lines;
+
+  for (const feature of geojson.features) {
+    const geom = feature?.geometry;
+    if (!geom) continue;
+    if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
+      lines.push(geom.coordinates);
+    } else if (geom.type === "MultiLineString" && Array.isArray(geom.coordinates)) {
+      for (const line of geom.coordinates) {
+        if (Array.isArray(line)) lines.push(line);
+      }
+    }
+  }
+
+  return lines;
+}
+
+export function buildRoadPointCacheFromGeojson(
+  geojson,
+  bounds,
+  cols = CONFIG.gridCols,
+  rows = CONFIG.gridRows,
+  { stride = ROAD_POINT_STRIDE, maxPoints = MAX_ROAD_POINTS } = {}
+) {
+  const lines = extractRoadLines(geojson);
+  const points = [];
+
+  for (const line of lines) {
+    if (!line || line.length < 2) continue;
+    for (let i = 0; i < line.length; i += Math.max(1, stride)) {
+      const [lon, lat] = line[i];
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      if (!inBoundsLatLon(lat, lon, bounds)) continue;
+      points.push({ lat, lon });
+    }
+  }
+
+  if (points.length > maxPoints) {
+    const step = Math.ceil(points.length / maxPoints);
+    const slim = [];
+    for (let i = 0; i < points.length; i += step) slim.push(points[i]);
+    points.length = 0;
+    points.push(...slim);
+  }
+
+  const keySet = new Set();
+  for (const p of points) {
+    const k = latLonToCellKey(p.lat, p.lon, bounds, cols, rows);
+    if (k) keySet.add(k);
+  }
+
+  return { points, keys: Array.from(keySet) };
+}
+
 // --- Canvas setup ---
 if (typeof window !== "undefined") {
 const canvas = document.getElementById("c");
@@ -176,11 +284,11 @@ const hud = document.getElementById("hud");
 const ctx = canvas.getContext("2d", { alpha: false });
 
 const ROADS_URL = "./data/osm/roads.geojson";
-const ROADS_COMPACT_URL = "./data/osm/roads.compact.json";
 const roadsLayer = document.createElement("canvas");
 const roadsCtx = roadsLayer.getContext("2d", { alpha: true });
 let roadsLines = [];
 let roadsReady = false;
+let roadsPointCache = { points: [], keys: [] };
 let showRoads = CONFIG.showRoads;
 
 if (hud && CONFIG.hud === 0) {
@@ -279,20 +387,8 @@ function project(lat, lon, simBounds, w, h) {
   return { x: x * w, y: y * h };
 }
 
-function inBoundsLatLon(lat, lon, bounds) {
-  return lat <= bounds.north && lat >= bounds.south && lon >= bounds.west && lon <= bounds.east;
-}
-
 // --- Grid graph (prototype) ---
 // We map grid cells to lat/lon centers inside the bounds.
-function key(i, j) {
-  return `${i},${j}`;
-}
-function parseKey(k) {
-  const [i, j] = k.split(",").map((n) => parseInt(n, 10));
-  return { i, j };
-}
-
 function cellLatLon(i, j, bounds) {
   const lat = bounds.north - (j + 0.5) * ((bounds.north - bounds.south) / CONFIG.gridRows);
   const lon = bounds.west + (i + 0.5) * ((bounds.east - bounds.west) / CONFIG.gridCols);
@@ -341,6 +437,11 @@ function randomCell(bounds, rng = Math.random) {
   return key(i, j);
 }
 
+function randomRoadKey(rng = Math.random) {
+  if (!roadsPointCache?.keys?.length) return null;
+  return roadsPointCache.keys[Math.floor(rng() * roadsPointCache.keys.length)];
+}
+
 function pathLeavesBounds(pathKeys, bounds) {
   for (const k of pathKeys) {
     const { i, j } = parseKey(k);
@@ -348,6 +449,17 @@ function pathLeavesBounds(pathKeys, bounds) {
     if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return true;
   }
   return false;
+}
+
+function pathLengthMeters(pathKeys, bounds) {
+  if (!pathKeys || pathKeys.length < 2) return 0;
+  let total = 0;
+  for (let i = 1; i < pathKeys.length; i++) {
+    const a = cellLatLon(...Object.values(parseKey(pathKeys[i - 1])), bounds);
+    const b = cellLatLon(...Object.values(parseKey(pathKeys[i])), bounds);
+    total += haversineMeters(a, b);
+  }
+  return total;
 }
 
 // --- Simulation state ---
@@ -365,14 +477,33 @@ let cycle = 0;
 let endpointSamplingBestEffort = false;
 let endpointSamplingDistanceMeters = 0;
 let endpointSamplingTries = 0;
+let lastPathLengthMeters = 0;
 
 function pickEndpoints() {
   simBounds = applyZoom(BOUNDS, CONFIG.zoom);
 
+  const useRoadKeys = CONFIG.endpointMode === "roads" && roadsPointCache.keys.length > 0;
+
+  const randomKey = (rng) => {
+    if (useRoadKeys) return randomRoadKey(rng);
+
+    let k = randomCell(simBounds, rng);
+    if (CONFIG.endpointMode === "random" && roadsPointCache.points.length > 0) {
+      const ll = cellLatLon(...Object.values(parseKey(k)), simBounds);
+      const snapped = snapLatLonToRoadPoint(ll.lat, ll.lon, roadsPointCache.points);
+      if (snapped) {
+        const snappedKey = latLonToCellKey(snapped.lat, snapped.lon, simBounds);
+        if (snappedKey) k = snappedKey;
+      }
+    }
+
+    return k;
+  };
+
   const sampled = sampleEndpointPair({
     maxTries: ENDPOINT_SAMPLING_MAX_TRIES,
     minMeters: CONFIG.minStartEndMeters,
-    randomKey: (rng) => randomCell(simBounds, rng),
+    randomKey,
     toLatLon: (k) => cellLatLon(...Object.values(parseKey(k)), simBounds),
   });
 
@@ -477,30 +608,21 @@ function buildBackground(bctx, w, h) {
 }
 
 // --- OSM roads layer ---
-async function fetchRoadsJson(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`roads fetch failed: ${res.status}`);
-  return res.json();
-}
-
 async function loadRoads() {
   try {
-    const compact = await fetchRoadsJson(ROADS_COMPACT_URL);
-    roadsLines = extractRoadLines(compact);
-    roadsReady = roadsLines.length > 0;
-    if (roadsReady) {
-      buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
-      return;
-    }
-  } catch (err) {
-    // fall back to GeoJSON
-  }
-
-  try {
-    const geojson = await fetchRoadsJson(ROADS_URL);
+    const res = await fetch(ROADS_URL);
+    if (!res.ok) throw new Error(`roads fetch failed: ${res.status}`);
+    const geojson = await res.json();
     roadsLines = extractRoadLines(geojson);
     roadsReady = roadsLines.length > 0;
-    if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+    if (roadsReady) {
+      const cacheBounds = applyZoom(BOUNDS, CONFIG.zoom);
+      roadsPointCache = buildRoadPointCacheFromGeojson(geojson, cacheBounds);
+      buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+      if (CONFIG.endpointMode === "roads" && roadsPointCache.keys.length > 0) {
+        pickEndpoints();
+      }
+    }
   } catch (err) {
     console.warn("Failed to load roads layer", err);
   }
@@ -515,6 +637,8 @@ function buildRoadsLayer(rctx, w, h) {
   rctx.lineCap = "round";
   rctx.lineJoin = "round";
 
+  let segments = 0;
+
   for (const line of roadsLines) {
     if (!line || line.length < 2) continue;
     rctx.beginPath();
@@ -523,8 +647,11 @@ function buildRoadsLayer(rctx, w, h) {
       const p = project(lat, lon, simBounds, w, h);
       if (i === 0) rctx.moveTo(p.x, p.y);
       else rctx.lineTo(p.x, p.y);
+      segments += 1;
+      if (segments >= MAX_ROAD_SEGMENTS) break;
     }
     rctx.stroke();
+    if (segments >= MAX_ROAD_SEGMENTS) break;
   }
 
   rctx.restore();
@@ -588,7 +715,20 @@ function drawSet(step, keys, w, h, color, baseAlpha) {
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
 
+  const total = keys?.size ?? keys?.length ?? 0;
+  const stride = total > MAX_RENDER_NODES_PER_SET ? Math.ceil(total / MAX_RENDER_NODES_PER_SET) : 1;
+  let idx = 0;
+  let drawn = 0;
+
   for (const k of keys) {
+    if (stride > 1 && idx % stride !== 0) {
+      idx += 1;
+      continue;
+    }
+    idx += 1;
+    drawn += 1;
+    if (drawn > MAX_RENDER_NODES_PER_SET) break;
+
     const p = cellToXY(k, w, h);
     const f = step?.fScore?.get(k);
     const t = 1 - norm01(f, scoreRange.fLo, scoreRange.fHi); // "better" nodes glow more
@@ -804,6 +944,11 @@ function render(now) {
     `sample: <b>${Math.round(endpointSamplingDistanceMeters)}</b>m <span class="dim">·</span> tries: <b>${endpointSamplingTries}</b>` +
     (endpointSamplingBestEffort ? ` <span class="dim">·</span> <b style="color:#fb7185">min-distance not met; best-effort</b>` : "");
 
+  const statsLine =
+    `<span class="key">path</span>: <b>${Math.round(lastPathLengthMeters)}</b>m` +
+    ` <span class="dim">·</span> <span class="key">roads pts</span>: <b>${roadsPointCache.points.length}</b>` +
+    ` <span class="dim">·</span> <span class="key">endpointMode</span>: <b>${CONFIG.endpointMode}</b>`;
+
   if (hud && CONFIG.hud !== 0) {
     const openClosedLine =
       CONFIG.showOpenClosed !== 0
@@ -821,6 +966,7 @@ function render(now) {
       `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
       `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
       `${samplingLine}<br/>` +
+      `${statsLine}<br/>` +
       `${openClosedLine}<br/>` +
       `${vizLine}<br/>` +
       `<span class="dim">cfg</span>: sps=<b>${CONFIG.stepsPerSecond}</b> maxStepsPerFrame=<b>${CONFIG.maxStepsPerFrame}</b> zoom=<b>${CONFIG.zoom.toFixed(2)}</b><br/>` +
@@ -853,6 +999,7 @@ function tick(now) {
           }
 
           finalPath = r.path;
+          lastPathLengthMeters = pathLengthMeters(r.path, simBounds);
           phase = "end-hold";
           phaseT = 0;
         } else {
