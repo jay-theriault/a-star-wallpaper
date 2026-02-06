@@ -218,7 +218,10 @@ export const ENDPOINT_SAMPLING_MAX_TRIES = 5000;
 
 const MAX_RENDER_NODES_PER_SET = 3500;
 const MAX_RENDER_NODES_PER_FRAME = 5200;
-const MAX_ROAD_SEGMENTS = 120000;
+// Safety cap for pre-rendering OSM roads into an offscreen canvas.
+// With zoomed-in defaults we can afford a higher ceiling, but we still keep a cap
+// to avoid locking up weaker machines.
+const MAX_ROAD_SEGMENTS = 300000;
 const ROAD_POINT_STRIDE = 2;
 const MAX_ROAD_POINTS = 7000;
 
@@ -956,21 +959,36 @@ function buildRoadsLayer(rctx, w, h) {
   rctx.lineCap = "round";
   rctx.lineJoin = "round";
 
+  // Goal: avoid a single very-long polyline consuming the entire segment budget.
+  // We downsample long lines so we draw (at least) a little bit of everything.
+  const MAX_SEGMENTS_PER_LINE = 1600;
+
   let segments = 0;
 
   for (const line of roadsLines) {
     if (!line || line.length < 2) continue;
+    if (segments >= MAX_ROAD_SEGMENTS) break;
+
+    const stride = line.length > MAX_SEGMENTS_PER_LINE ? Math.ceil(line.length / MAX_SEGMENTS_PER_LINE) : 1;
+
     rctx.beginPath();
-    for (let i = 0; i < line.length; i++) {
+    let first = true;
+
+    for (let i = 0; i < line.length; i += stride) {
       const [lon, lat] = line[i];
       const p = project(lat, lon, simBounds, w, h);
-      if (i === 0) rctx.moveTo(p.x, p.y);
-      else rctx.lineTo(p.x, p.y);
+      if (first) {
+        rctx.moveTo(p.x, p.y);
+        first = false;
+      } else {
+        rctx.lineTo(p.x, p.y);
+      }
+
       segments += 1;
       if (segments >= MAX_ROAD_SEGMENTS) break;
     }
+
     rctx.stroke();
-    if (segments >= MAX_ROAD_SEGMENTS) break;
   }
 
   rctx.restore();
