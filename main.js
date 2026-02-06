@@ -227,10 +227,10 @@ const MAX_RENDER_NODES_PER_FRAME = 5200;
 // Safety cap for pre-rendering OSM roads into an offscreen canvas.
 // With zoomed-in defaults we can afford a higher ceiling, but we still keep a cap
 // to avoid locking up weaker machines.
-const MAX_ROAD_SEGMENTS = 300000;
-const MIN_ROAD_SEGMENTS = 60000;
-const MAX_SEGMENTS_PER_LINE_HI = 1800;
-const MAX_SEGMENTS_PER_LINE_LO = 500;
+const MAX_ROAD_SEGMENTS = 1200000;
+const MIN_ROAD_SEGMENTS = 150000;
+const MAX_SEGMENTS_PER_LINE_HI = 6000;
+const MAX_SEGMENTS_PER_LINE_LO = 1200;
 const ROAD_POINT_STRIDE = 2;
 const MAX_ROAD_POINTS = 7000;
 
