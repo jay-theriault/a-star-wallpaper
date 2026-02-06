@@ -1,4 +1,5 @@
 import { haversineMeters, makeAStarStepper, reconstructPath } from "./astar.js";
+import { extractRoadLines } from "./roads-data.js";
 
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
@@ -175,6 +176,7 @@ const hud = document.getElementById("hud");
 const ctx = canvas.getContext("2d", { alpha: false });
 
 const ROADS_URL = "./data/osm/roads.geojson";
+const ROADS_COMPACT_URL = "./data/osm/roads.compact.json";
 const roadsLayer = document.createElement("canvas");
 const roadsCtx = roadsLayer.getContext("2d", { alpha: true });
 let roadsLines = [];
@@ -475,30 +477,27 @@ function buildBackground(bctx, w, h) {
 }
 
 // --- OSM roads layer ---
-function extractRoadLines(geojson) {
-  const lines = [];
-  if (!geojson || geojson.type !== "FeatureCollection" || !Array.isArray(geojson.features)) return lines;
-
-  for (const feature of geojson.features) {
-    const geom = feature?.geometry;
-    if (!geom) continue;
-    if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
-      lines.push(geom.coordinates);
-    } else if (geom.type === "MultiLineString" && Array.isArray(geom.coordinates)) {
-      for (const line of geom.coordinates) {
-        if (Array.isArray(line)) lines.push(line);
-      }
-    }
-  }
-
-  return lines;
+async function fetchRoadsJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`roads fetch failed: ${res.status}`);
+  return res.json();
 }
 
 async function loadRoads() {
   try {
-    const res = await fetch(ROADS_URL);
-    if (!res.ok) throw new Error(`roads fetch failed: ${res.status}`);
-    const geojson = await res.json();
+    const compact = await fetchRoadsJson(ROADS_COMPACT_URL);
+    roadsLines = extractRoadLines(compact);
+    roadsReady = roadsLines.length > 0;
+    if (roadsReady) {
+      buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+      return;
+    }
+  } catch (err) {
+    // fall back to GeoJSON
+  }
+
+  try {
+    const geojson = await fetchRoadsJson(ROADS_URL);
     roadsLines = extractRoadLines(geojson);
     roadsReady = roadsLines.length > 0;
     if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);

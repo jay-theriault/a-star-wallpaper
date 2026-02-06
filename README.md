@@ -87,11 +87,18 @@ python -m http.server 8000
 - `astar.js` — A* implementation and helpers
 
 ### OSM roads data
-The road layer is loaded from a cached GeoJSON file in `data/osm/roads.geojson`.
+The road layer prefers a compact JSON cache if present, then falls back to GeoJSON:
+- `data/osm/roads.compact.json` (compact, faster to load)
+- `data/osm/roads.geojson` (GeoJSON fallback)
+
 To refresh it (dev step only), run:
 
 ```bash
+# default GeoJSON (Overpass fetch)
 node scripts/fetch-osm-roads.js
+
+# compact format
+node scripts/fetch-osm-roads.js --format=compact
 ```
 
 ---
