@@ -1,4 +1,4 @@
-import { haversineMeters, makeAStarStepper } from "./astar.js";
+import { haversineMeters, makeAStarStepper, reconstructPath } from "./astar.js";
 
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
@@ -15,8 +15,9 @@ const THEME = {
   road: "rgba(210,225,255,0.055)",
   roadDash: "rgba(255,255,255,0.08)",
 
+  // Tuned for legibility on dark background (open/closed/current are distinct).
   open: "#22d3ee", // cyan
-  closed: "#a78bfa", // violet
+  closed: "#fbbf24", // amber
   current: "#ffffff",
 
   pathCore: "rgba(70, 245, 255, 0.96)",
@@ -25,6 +26,10 @@ const THEME = {
   start: "#34d399",
   goal: "#fb7185",
 };
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
 
 // --- Runtime configuration (query params) ---
 //
@@ -35,9 +40,14 @@ const THEME = {
 //   - endHoldMs: int [0, 60000]
 //   - endAnimMs: int [0, 60000]
 //   - minStartEndMeters: int [0, 200000]
+//   - showOpenClosed: 0|1 (default 1)
+//   - showCurrent: 0|1 (default 1)
+//   - showPathDuringSearch: 0|1 (default 0)
+//   - maxStepsPerFrame: int [1, 500] (default 60)
 
 const DEFAULT_CONFIG = {
   stepsPerSecond: 20,
+  maxStepsPerFrame: 60,
 
   // hold after finding the path
   endHoldMs: 1800,
@@ -61,6 +71,11 @@ const DEFAULT_CONFIG = {
   discardIfPathLeavesBounds: true,
   zoom: 1.0,
   hud: 1,
+
+  // viz toggles
+  showOpenClosed: 1,
+  showCurrent: 1,
+  showPathDuringSearch: 0,
 };
 
 function parseRuntimeConfig(search) {
@@ -82,7 +97,7 @@ function parseRuntimeConfig(search) {
     return clamp(n, lo, hi);
   };
 
-  const readHud01 = (name, def01) => {
+  const read01 = (name, def01) => {
     const raw = params.get(name);
     if (raw == null) return def01;
     if (raw === "0") return 0;
@@ -91,17 +106,23 @@ function parseRuntimeConfig(search) {
   };
 
   const stepsPerSecond = readInt("sps", DEFAULT_CONFIG.stepsPerSecond, 1, 120);
+  const maxStepsPerFrame = readInt("maxStepsPerFrame", DEFAULT_CONFIG.maxStepsPerFrame, 1, 500);
 
   return {
     ...DEFAULT_CONFIG,
     stepsPerSecond,
+    maxStepsPerFrame,
     // use a delay to drive the fixed-rate stepping loop
     stepDelayMs: 1000 / stepsPerSecond,
     zoom: readFloat("zoom", DEFAULT_CONFIG.zoom, 0.5, 2.0),
-    hud: readHud01("hud", DEFAULT_CONFIG.hud),
+    hud: read01("hud", DEFAULT_CONFIG.hud),
     endHoldMs: readInt("endHoldMs", DEFAULT_CONFIG.endHoldMs, 0, 60000),
     endAnimMs: readInt("endAnimMs", DEFAULT_CONFIG.endAnimMs, 0, 60000),
     minStartEndMeters: readInt("minStartEndMeters", DEFAULT_CONFIG.minStartEndMeters, 0, 200000),
+
+    showOpenClosed: read01("showOpenClosed", DEFAULT_CONFIG.showOpenClosed),
+    showCurrent: read01("showCurrent", DEFAULT_CONFIG.showCurrent),
+    showPathDuringSearch: read01("showPathDuringSearch", DEFAULT_CONFIG.showPathDuringSearch),
   };
 }
 
@@ -180,10 +201,6 @@ window.addEventListener("resize", resize);
 resize();
 
 // --- Coordinate helpers ---
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
 function bboxCenter(bounds) {
   return {
     lat: (bounds.north + bounds.south) / 2,
@@ -650,25 +667,48 @@ function drawCurrent(k, w, h, now) {
   const t = (now % 900) / 900;
   const pulse = 0.5 - 0.5 * Math.cos(t * Math.PI * 2);
 
+  // Make current *unambiguous* even when open/closed sets get dense.
+  // Use a high-contrast "target" marker with an outline pass.
   ctx.save();
-  ctx.globalCompositeOperation = "lighter";
 
-  // Outer pulse.
-  ctx.globalAlpha = 0.20 + 0.28 * pulse;
-  ctx.strokeStyle = "rgba(255,255,255,0.9)";
-  ctx.lineWidth = 2;
-  ctx.shadowColor = "rgba(255,255,255,0.6)";
-  ctx.shadowBlur = 16;
+  // Outline (source-over) to separate from dense additive dots.
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 0.9;
+  ctx.strokeStyle = "rgba(0,0,0,0.65)";
+  ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.arc(p.x, p.y, 10 + 8 * pulse, 0, Math.PI * 2);
+  ctx.arc(p.x, p.y, 11 + 8 * pulse, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Core.
-  ctx.globalAlpha = 0.9;
-  ctx.shadowBlur = 0;
-  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.globalCompositeOperation = "lighter";
+
+  // Outer pulse ring.
+  ctx.globalAlpha = 0.30 + 0.34 * pulse;
+  ctx.strokeStyle = "rgba(255,255,255,0.95)";
+  ctx.lineWidth = 2;
+  ctx.shadowColor = "rgba(255,255,255,0.65)";
+  ctx.shadowBlur = 18;
   ctx.beginPath();
-  ctx.arc(p.x, p.y, 3.4, 0, Math.PI * 2);
+  ctx.arc(p.x, p.y, 11 + 8 * pulse, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Crosshair (helps when ring overlaps lots of points).
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 0.60;
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(p.x - 9, p.y);
+  ctx.lineTo(p.x + 9, p.y);
+  ctx.moveTo(p.x, p.y - 9);
+  ctx.lineTo(p.x, p.y + 9);
+  ctx.stroke();
+
+  // Core dot.
+  ctx.globalAlpha = 0.95;
+  ctx.fillStyle = "rgba(255,255,255,0.95)";
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, 3.6, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.restore();
@@ -692,9 +732,24 @@ function render(now) {
   ctx.restore();
 
   if (currentStep && currentStep.status === "searching") {
-    drawSet(currentStep, currentStep.closedSet, w, h, THEME.closed, 0.07);
-    drawSet(currentStep, currentStep.openSet, w, h, THEME.open, 0.10);
-    drawCurrent(currentStep.current, w, h, now);
+    if (CONFIG.showOpenClosed !== 0) {
+      drawSet(currentStep, currentStep.closedSet, w, h, THEME.closed, 0.08);
+      drawSet(currentStep, currentStep.openSet, w, h, THEME.open, 0.11);
+    }
+
+    if (CONFIG.showPathDuringSearch !== 0) {
+      // Draw the current "cameFrom" chain as a faint hint.
+      // (Not the final path — just the best-known predecessor chain to `current`.)
+      const partial = reconstructPath(currentStep.cameFrom, currentStep.current);
+      ctx.save();
+      ctx.globalAlpha = 0.20;
+      drawPath(partial, w, h, 1.0, 0.0);
+      ctx.restore();
+    }
+
+    if (CONFIG.showCurrent !== 0) {
+      drawCurrent(currentStep.current, w, h, now);
+    }
   }
 
   if (finalPath) {
@@ -725,23 +780,39 @@ function render(now) {
     (endpointSamplingBestEffort ? ` <span class="dim">·</span> <b style="color:#fb7185">min-distance not met; best-effort</b>` : "");
 
   if (hud && CONFIG.hud !== 0) {
+    const openClosedLine =
+      CONFIG.showOpenClosed !== 0
+        ? `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b>`
+        : `<span class="key">open/closed</span>: <b class="dim">hidden</b>`;
+
+    const vizLine =
+      `<span class="dim">viz</span>:` +
+      ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
+      ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
+      ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>`;
+
     hud.innerHTML =
       `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
       `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
       `${samplingLine}<br/>` +
-      `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b><br/>` +
-      `<span class="dim">cfg</span>: sps=<b>${CONFIG.stepsPerSecond}</b> zoom=<b>${CONFIG.zoom.toFixed(2)}</b> minDist=<b>${CONFIG.minStartEndMeters}</b>m<br/>` +
-      `<span class="dim">rate</span>: ~<b>${CONFIG.stepsPerSecond}</b> steps/sec`;
+      `${openClosedLine}<br/>` +
+      `${vizLine}<br/>` +
+      `<span class="dim">cfg</span>: sps=<b>${CONFIG.stepsPerSecond}</b> maxStepsPerFrame=<b>${CONFIG.maxStepsPerFrame}</b> zoom=<b>${CONFIG.zoom.toFixed(2)}</b><br/>` +
+      `<span class="dim">cfg</span>: minDist=<b>${CONFIG.minStartEndMeters}</b>m`;
   }
 
   requestAnimationFrame(tick);
 }
 
 function tick(now) {
-  // step A* at fixed rate
+  // step A* at fixed rate (but allow multiple steps per frame when frames are slow)
   if (phase === "search") {
-    if (now - lastStepAt >= CONFIG.stepDelayMs) {
-      lastStepAt = now;
+    let stepsThisFrame = 0;
+
+    while (now - lastStepAt >= CONFIG.stepDelayMs && stepsThisFrame < CONFIG.maxStepsPerFrame) {
+      lastStepAt += CONFIG.stepDelayMs;
+      stepsThisFrame += 1;
+
       const r = stepper.step();
       currentStep = r;
       if (!r.done && r.status === "searching") computeScoreRange(r);
@@ -762,7 +833,13 @@ function tick(now) {
           // no path — resample
           pickEndpoints();
         }
+        break;
       }
+    }
+
+    // If the tab was backgrounded, avoid an enormous catch-up loop.
+    if (now - lastStepAt > CONFIG.stepDelayMs * CONFIG.maxStepsPerFrame) {
+      lastStepAt = now;
     }
   } else if (phase === "end-hold") {
     phaseT += 16.67;

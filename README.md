@@ -36,21 +36,25 @@ All params are **optional**. Out-of-range values are **clamped**; non-numeric/in
 
 ### Supported params
 - `sps` (steps per second): integer **[1, 120]** (default **20**)
+- `maxStepsPerFrame`: int **[1, 500]** (default **60**)
 - `zoom`: float **[0.5, 2.0]** (default **1.0**)
 - `hud`: **0|1** (default **1**)
+- `showOpenClosed`: **0|1** (default **1**)
+- `showCurrent`: **0|1** (default **1**)
+- `showPathDuringSearch`: **0|1** (default **0**)
 - `endHoldMs`: int **[0, 60000]** (default: whatever `main.js` ships with)
 - `endAnimMs`: int **[0, 60000]** (default: whatever `main.js` ships with)
 - `minStartEndMeters`: int **[0, 200000]** (default: whatever `main.js` ships with)
 
 ### Examples
 1) Faster search, zoomed in:
-- `index.html?zoom=1.2&sps=30`
+- `index.html?zoom=1.2&sps=45&maxStepsPerFrame=120`
 
-2) Hide the HUD (good for “clean” wallpaper mode):
-- `index.html?zoom=1.2&sps=30&hud=0`
+2) Clean wallpaper mode (hide HUD + hide open/closed sets):
+- `index.html?hud=0&showOpenClosed=0`
 
-3) Longer end hold + minimum start/end distance:
-- `index.html?endHoldMs=5000&endAnimMs=1500&minStartEndMeters=12000`
+3) Show a faint "path hint" during the search (useful for debugging):
+- `index.html?showPathDuringSearch=1&sps=25&zoom=1.1`
 
 ### Edit defaults
 Open `main.js` and adjust `DEFAULT_CONFIG` (or other constants) to change the shipped defaults.
