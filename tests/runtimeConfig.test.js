@@ -12,6 +12,7 @@ test("parseRuntimeConfig defaults remain when no mode is provided", () => {
   assert.equal(cfg.showOpenClosed, DEFAULT_CONFIG.showOpenClosed);
   assert.equal(cfg.showCurrent, DEFAULT_CONFIG.showCurrent);
   assert.equal(cfg.showRoads, DEFAULT_CONFIG.showRoads);
+  assert.equal(cfg.graph, DEFAULT_CONFIG.graph);
 });
 
 test("parseRuntimeConfig chill preset applies bundled toggles", () => {

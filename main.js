@@ -1,6 +1,8 @@
 import { haversineMeters, makeAStarStepper, reconstructPath } from "./astar.js";
 import { DEFAULT_GUARDRAILS, updateGuardrails } from "./guardrails.js";
 import { stepEndPhase } from "./endPhase.js";
+import { extractRoadLines } from "./roads-data.js";
+import { buildRoadGraph, graphNodeLatLon, randomGraphNode } from "./road-graph.js";
 
 // --- Spec-driven constants (initial proposal; tweak later) ---
 const BOUNDS = {
@@ -52,6 +54,7 @@ function clamp(v, lo, hi) {
 //   - showRoads: 0|1 (default 1)
 //   - maxStepsPerFrame: int [1, 500] (default 60)
 //   - endpointMode: roads|random (default roads)
+//   - graph: roads|grid (default roads)
 //   - showHud: 0|1 (alias for hud)
 //   - soak: 0|1 (default 0)
 
@@ -92,6 +95,7 @@ export const DEFAULT_CONFIG = {
   showPathDuringSearch: 0,
   showRoads: 1,
   endpointMode: "roads",
+  graph: "roads",
   soak: 0,
 };
 
@@ -163,6 +167,7 @@ export function parseRuntimeConfig(search) {
 
   const hud = read01("hud", read01("showHud", base.hud));
   const endpointMode = readEnum("endpointMode", base.endpointMode, new Set(["roads", "random"]));
+  const graph = readEnum("graph", base.graph, new Set(["roads", "grid"]));
   const soak = read01("soak", base.soak);
 
   // End animation timing
@@ -182,6 +187,7 @@ export function parseRuntimeConfig(search) {
     zoom: readFloat("zoom", base.zoom, 0.5, 2.0),
     hud,
     endpointMode,
+    graph,
     soak,
     endHoldMs: readInt("endHoldMs", base.endHoldMs, 0, 60000),
     endAnimMs,
@@ -274,24 +280,7 @@ export function snapLatLonToRoadPoint(lat, lon, roadPoints) {
   return best;
 }
 
-function extractRoadLines(geojson) {
-  const lines = [];
-  if (!geojson || geojson.type !== "FeatureCollection" || !Array.isArray(geojson.features)) return lines;
-
-  for (const feature of geojson.features) {
-    const geom = feature?.geometry;
-    if (!geom) continue;
-    if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
-      lines.push(geom.coordinates);
-    } else if (geom.type === "MultiLineString" && Array.isArray(geom.coordinates)) {
-      for (const line of geom.coordinates) {
-        if (Array.isArray(line)) lines.push(line);
-      }
-    }
-  }
-
-  return lines;
-}
+// extractRoadLines moved to roads-data.js
 
 export function buildRoadPointCacheFromGeojson(
   geojson,
@@ -337,12 +326,15 @@ const hud = document.getElementById("hud");
 const help = document.getElementById("help");
 const ctx = canvas.getContext("2d", { alpha: false });
 
-const ROADS_URL = "./data/osm/roads.geojson";
+const ROADS_GEO_URL = "./data/osm/roads.geojson";
+const ROADS_COMPACT_URL = "./data/osm/roads.compact.json";
 const roadsLayer = document.createElement("canvas");
 const roadsCtx = roadsLayer.getContext("2d", { alpha: true });
 let roadsLines = [];
 let roadsReady = false;
 let roadsPointCache = { points: [], keys: [] };
+let roadGraph = null;
+let roadGraphReady = false;
 let showRoads = CONFIG.showRoads;
 
 let helpVisible = false;
@@ -507,11 +499,28 @@ function randomRoadKey(rng = Math.random) {
   return roadsPointCache.keys[Math.floor(rng() * roadsPointCache.keys.length)];
 }
 
+function isRoadGraphActive() {
+  return CONFIG.graph === "roads" && roadGraphReady && roadGraph?.nodes?.length > 0;
+}
+
+function keyToLatLon(k, bounds) {
+  if (isRoadGraphActive()) {
+    return graphNodeLatLon(roadGraph, k);
+  }
+  const { i, j } = parseKey(k);
+  return cellLatLon(i, j, bounds);
+}
+
+function keyToXY(k, w, h) {
+  const ll = keyToLatLon(k, simBounds);
+  if (!ll) return { x: -1000, y: -1000 };
+  return project(ll.lat, ll.lon, simBounds, w, h);
+}
+
 function pathLeavesBounds(pathKeys, bounds) {
   for (const k of pathKeys) {
-    const { i, j } = parseKey(k);
-    const ll = cellLatLon(i, j, bounds);
-    if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return true;
+    const ll = keyToLatLon(k, bounds);
+    if (!ll || !inBoundsLatLon(ll.lat, ll.lon, bounds)) return true;
   }
   return false;
 }
@@ -520,8 +529,9 @@ function pathLengthMeters(pathKeys, bounds) {
   if (!pathKeys || pathKeys.length < 2) return 0;
   let total = 0;
   for (let i = 1; i < pathKeys.length; i++) {
-    const a = cellLatLon(...Object.values(parseKey(pathKeys[i - 1])), bounds);
-    const b = cellLatLon(...Object.values(parseKey(pathKeys[i])), bounds);
+    const a = keyToLatLon(pathKeys[i - 1], bounds);
+    const b = keyToLatLon(pathKeys[i], bounds);
+    if (!a || !b) continue;
     total += haversineMeters(a, b);
   }
   return total;
@@ -566,9 +576,11 @@ let soakStats = {
 function pickEndpoints() {
   simBounds = applyZoom(BOUNDS, CONFIG.zoom);
 
+  const useRoadGraph = isRoadGraphActive();
   const useRoadKeys = CONFIG.endpointMode === "roads" && roadsPointCache.keys.length > 0;
 
   const randomKey = (rng) => {
+    if (useRoadGraph) return randomGraphNode(roadGraph, rng);
     if (useRoadKeys) return randomRoadKey(rng);
 
     let k = randomCell(simBounds, rng);
@@ -594,7 +606,7 @@ function pickEndpoints() {
     maxTries: ENDPOINT_SAMPLING_MAX_TRIES,
     minMeters: effectiveMinStartEndMeters,
     randomKey,
-    toLatLon: (k) => cellLatLon(...Object.values(parseKey(k)), simBounds),
+    toLatLon: (k) => keyToLatLon(k, simBounds),
   });
 
   startKey = sampled.startKey;
@@ -603,13 +615,30 @@ function pickEndpoints() {
   endpointSamplingDistanceMeters = sampled.distanceMeters;
   endpointSamplingTries = sampled.tries;
 
-  stepper = makeAStarStepper({
-    startKey,
-    goalKey,
-    neighbors: neighborsOf,
-    cost: (a, b) => cost(a, b, simBounds),
-    heuristic: (a, g2) => heuristic(a, g2, simBounds),
-  });
+  if (useRoadGraph) {
+    stepper = makeAStarStepper({
+      startKey,
+      goalKey,
+      neighbors: (k) => roadGraph.adjacency[k].map((edge) => edge.to),
+      cost: (a, b) => {
+        const w = roadGraph.costMaps[a]?.get(b);
+        if (Number.isFinite(w)) return w;
+        const aLL = graphNodeLatLon(roadGraph, a);
+        const bLL = graphNodeLatLon(roadGraph, b);
+        return aLL && bLL ? haversineMeters(aLL, bLL) : Infinity;
+      },
+      heuristic: (a, g2) => haversineMeters(graphNodeLatLon(roadGraph, a), graphNodeLatLon(roadGraph, g2)),
+      isValidNode: (k) => roadGraph?.nodes?.[k] != null,
+    });
+  } else {
+    stepper = makeAStarStepper({
+      startKey,
+      goalKey,
+      neighbors: neighborsOf,
+      cost: (a, b) => cost(a, b, simBounds),
+      heuristic: (a, g2) => heuristic(a, g2, simBounds),
+    });
+  }
 
   currentStep = null;
   finalPath = null;
@@ -705,16 +734,31 @@ function buildBackground(bctx, w, h) {
 // --- OSM roads layer ---
 async function loadRoads() {
   try {
-    const res = await fetch(ROADS_URL);
-    if (!res.ok) throw new Error(`roads fetch failed: ${res.status}`);
-    const geojson = await res.json();
-    roadsLines = extractRoadLines(geojson);
+    let data = null;
+    let res = await fetch(ROADS_COMPACT_URL);
+    if (res.ok) {
+      data = await res.json();
+    } else {
+      res = await fetch(ROADS_GEO_URL);
+      if (!res.ok) throw new Error(`roads fetch failed: ${res.status}`);
+      data = await res.json();
+    }
+
+    roadsLines = extractRoadLines(data);
     roadsReady = roadsLines.length > 0;
     if (roadsReady) {
       const cacheBounds = applyZoom(BOUNDS, CONFIG.zoom);
-      roadsPointCache = buildRoadPointCacheFromGeojson(geojson, cacheBounds);
+      roadsPointCache = buildRoadPointCacheFromGeojson(data, cacheBounds);
+      roadGraph = buildRoadGraph(roadsLines, {
+        toleranceMeters: 8,
+        bounds: cacheBounds,
+      });
+      roadGraphReady = roadGraph.nodes.length > 0;
       buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
-      if (CONFIG.endpointMode === "roads" && roadsPointCache.keys.length > 0) {
+      if (
+        (CONFIG.graph === "roads" && roadGraphReady) ||
+        (CONFIG.endpointMode === "roads" && roadsPointCache.keys.length > 0)
+      ) {
         pickEndpoints();
       }
     }
@@ -753,9 +797,7 @@ function buildRoadsLayer(rctx, w, h) {
 }
 
 function cellToXY(k, w, h) {
-  const { i, j } = parseKey(k);
-  const ll = cellLatLon(i, j, simBounds);
-  return project(ll.lat, ll.lon, simBounds, w, h);
+  return keyToXY(k, w, h);
 }
 
 function norm01(v, lo, hi) {
@@ -1078,9 +1120,14 @@ function render(now) {
         (guardrailState.relaxCyclesRemaining > 0 ? ` <b style="color:#fbbf24">RELAXED</b>` : "")
       : "";
 
+  const graphLabel = isRoadGraphActive() ? "roads" : "grid";
+  const graphStats = isRoadGraphActive()
+    ? `<span class="key">graph</span>: <b>${roadGraph.nodes.length}</b> nodes <span class="dim">·</span> <b>${roadGraph.edges}</b> edges`
+    : `<span class="key">graph</span>: <b>${CONFIG.gridCols}×${CONFIG.gridRows}</b> grid`;
+
   const statsLine =
     `<span class="key">path</span>: <b>${Math.round(lastPathLengthMeters)}</b>m` +
-    ` <span class="dim">·</span> <span class="key">roads pts</span>: <b>${roadsPointCache.points.length}</b>` +
+    ` <span class="dim">·</span> ${graphStats}` +
     ` <span class="dim">·</span> <span class="key">endpointMode</span>: <b>${CONFIG.endpointMode}</b>` +
     soakLine;
 
@@ -1098,7 +1145,7 @@ function render(now) {
       ` roads=<b>${showRoads ? 1 : 0}</b>`;
 
     hud.innerHTML =
-      `<b>A*</b> Greater Boston <span class="dim">· prototype grid · cycle ${cycle}</span><br/>` +
+      `<b>A*</b> Greater Boston <span class="dim">· graph=${graphLabel} · cycle ${cycle}</span><br/>` +
       `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
       `${samplingLine}<br/>` +
       `${statsLine}<br/>` +
@@ -1124,14 +1171,15 @@ function render(now) {
       ` zoom=<b>${CONFIG.zoom.toFixed(2)}</b>` +
       ` endHoldMs=<b>${CONFIG.endHoldMs}</b>` +
       ` endAnimMs=<b>${CONFIG.endAnimMs}</b>` +
-      ` minStartEndMeters=<b>${CONFIG.minStartEndMeters}</b>`;
+      ` minStartEndMeters=<b>${CONFIG.minStartEndMeters}</b>` +
+      ` graph=<b>${CONFIG.graph}</b>`;
 
     help.innerHTML =
       `<b>Help</b> <span class="dim">· toggle with ?</span><br/>` +
       `<span class="dim">keys</span>: <span class="key">r</span> roads <span class="dim">·</span> <span class="key">?</span> help<br/>` +
       `<span class="dim">toggles</span>: ${togglesLine}<br/>` +
       `<span class="dim">query params</span>: ${paramsLine}<br/>` +
-      `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads`;
+      `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, graph, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads`;
   }
 
   requestAnimationFrame(tick);
