@@ -882,6 +882,10 @@ function extractLandPolys(geojson) {
     const geom = f?.geometry;
     if (!geom) continue;
 
+    // For now we keep only water polygons. "Land" polygons from OSM landuse/natural tags are
+    // very patchy and tend to look blotchy; we instead paint a subtle global land tint.
+    if (kind !== "water") continue;
+
     if (geom.type === "Polygon") {
       const rings = geom.coordinates || [];
       if (rings.length) polys.push({ kind, rings });
@@ -911,13 +915,20 @@ async function loadLand() {
 
 function buildLandLayer(lctx, w, h) {
   lctx.clearRect(0, 0, w, h);
+
+  // Paint a subtle global land tint so the map feels "grounded" even without perfect landuse.
+  lctx.save();
+  lctx.fillStyle = THEME.landFill;
+  lctx.fillRect(0, 0, w, h);
+  lctx.restore();
+
   if (!landPolys.length) return;
 
-  for (const poly of landPolys) {
-    const fill = poly.kind === "water" ? THEME.waterFill : THEME.landFill;
-    lctx.save();
-    lctx.fillStyle = fill;
+  // Draw water polygons on top.
+  lctx.save();
+  lctx.fillStyle = THEME.waterFill;
 
+  for (const poly of landPolys) {
     for (const ring of poly.rings) {
       if (!ring || ring.length < 3) continue;
       lctx.beginPath();
@@ -930,9 +941,9 @@ function buildLandLayer(lctx, w, h) {
       lctx.closePath();
       lctx.fill();
     }
-
-    lctx.restore();
   }
+
+  lctx.restore();
 }
 
 // --- OSM roads layer ---
