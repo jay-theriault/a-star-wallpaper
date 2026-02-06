@@ -49,6 +49,9 @@ function buildQuery(bounds) {
       relation["type"="multipolygon"]["natural"~"water|bay"](${south},${west},${north},${east});
       relation["type"="multipolygon"]["water"~"river|riverbank|canal|basin|harbour|reservoir|lake|pond|bay"](${south},${west},${north},${east});
       relation["type"="multipolygon"]["waterway"="riverbank"](${south},${west},${north},${east});
+
+      // Some coastal/ocean water surfaces are tagged as "place=sea".
+      relation["type"="multipolygon"]["place"="sea"](${south},${west},${north},${east});
     );
     (._;>;);
     out geom;`;

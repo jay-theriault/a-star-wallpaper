@@ -215,7 +215,7 @@ export function parseRuntimeConfig(search) {
     maxStepsPerFrame,
     // use a delay to drive the fixed-rate stepping loop
     stepDelayMs: 1000 / stepsPerSecond,
-    zoom: readFloat("zoom", base.zoom, 0.5, 2.0),
+    zoom: readFloat("zoom", base.zoom, 0.5, 50.0),
     hud,
     endpointMode,
     graph,
