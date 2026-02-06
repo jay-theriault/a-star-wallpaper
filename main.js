@@ -1011,7 +1011,7 @@ function extractParksPolys(geojson) {
 function buildCoastlineMask(w, h) {
   // Low-res mask for flood fill.
   // Increase resolution to avoid narrow channels getting "sealed" by thick lines.
-  const mw = 1024;
+  const mw = 2048;
   const mh = Math.round((mw * h) / w);
   const mask = document.createElement("canvas");
   mask.width = mw;
@@ -1043,21 +1043,19 @@ function buildCoastlineMask(w, h) {
   const data = img.data;
   const barrier = new Uint8Array(mw * mh);
 
-  // Threshold higher so antialiasing doesn't create fat barriers that close harbor mouths.
+  // Threshold very high so antialiasing doesn't create fat barriers that close harbor mouths.
   for (let i = 0; i < mw * mh; i++) {
     const a = data[i * 4 + 3];
-    barrier[i] = a > 220 ? 1 : 0;
+    barrier[i] = a > 245 ? 1 : 0;
   }
 
-  // 2) flood-fill ocean from a seed near NE corner (Boston bbox includes ocean to the east)
+  // 2) flood-fill ocean from the full east edge (robust: doesn't depend on a single seed point).
   const ocean = new Uint8Array(mw * mh);
   const qx = new Int32Array(mw * mh);
   const qy = new Int32Array(mw * mh);
   let qh = 0;
   let qt = 0;
 
-  const seedX = Math.floor(mw * 0.95);
-  const seedY = Math.floor(mh * 0.15);
   const push = (x, y) => {
     if (x < 0 || y < 0 || x >= mw || y >= mh) return;
     const idx = y * mw + x;
@@ -1069,7 +1067,12 @@ function buildCoastlineMask(w, h) {
     qt++;
   };
 
-  push(seedX, seedY);
+  // Seed a 3px-wide band on the east edge.
+  for (let y = 0; y < mh; y++) {
+    push(mw - 1, y);
+    push(mw - 2, y);
+    push(mw - 3, y);
+  }
   while (qh < qt) {
     const x = qx[qh];
     const y = qy[qh];
