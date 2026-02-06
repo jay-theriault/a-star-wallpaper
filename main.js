@@ -203,10 +203,37 @@ function applyZoom(bounds, zoom) {
   };
 }
 
-function project(lat, lon, bounds, w, h) {
-  // Simple equirect projection for prototype
-  const x = (lon - bounds.west) / (bounds.east - bounds.west);
-  const y = (bounds.north - lat) / (bounds.north - bounds.south);
+function project(lat, lon, simBounds, w, h) {
+  const c = bboxCenter(simBounds);
+  const cosLat = Math.cos((c.lat * Math.PI) / 180);
+
+  // Aspect-ratio-aware render framing:
+  // Treat 1° lon as cos(lat) "narrower" than 1° lat (equirectangular scale).
+  // Expand the axis that would otherwise stretch so the map letterboxes instead.
+  const latSpan = simBounds.north - simBounds.south;
+  const lonSpan = simBounds.east - simBounds.west;
+  const simAspect = (lonSpan * cosLat) / latSpan;
+  const viewAspect = w / h;
+
+  let renderLatSpan = latSpan;
+  let renderLonSpan = lonSpan;
+  if (viewAspect > simAspect) {
+    // viewport is wider → expand longitude span
+    renderLonSpan = (latSpan * viewAspect) / cosLat;
+  } else {
+    // viewport is taller → expand latitude span
+    renderLatSpan = (lonSpan * cosLat) / viewAspect;
+  }
+
+  const renderBounds = {
+    north: c.lat + renderLatSpan / 2,
+    south: c.lat - renderLatSpan / 2,
+    west: c.lon - renderLonSpan / 2,
+    east: c.lon + renderLonSpan / 2,
+  };
+
+  const x = (lon - renderBounds.west) / (renderBounds.east - renderBounds.west);
+  const y = (renderBounds.north - lat) / (renderBounds.north - renderBounds.south);
   return { x: x * w, y: y * h };
 }
 
@@ -282,7 +309,8 @@ function pathLeavesBounds(pathKeys, bounds) {
 }
 
 // --- Simulation state ---
-let visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
+// simBounds affects sampling + A* costs/heuristics only.
+let simBounds = applyZoom(BOUNDS, CONFIG.zoom);
 let startKey = null;
 let goalKey = null;
 let stepper = null;
@@ -297,13 +325,13 @@ let endpointSamplingDistanceMeters = 0;
 let endpointSamplingTries = 0;
 
 function pickEndpoints() {
-  visibleBounds = applyZoom(BOUNDS, CONFIG.zoom);
+  simBounds = applyZoom(BOUNDS, CONFIG.zoom);
 
   const sampled = sampleEndpointPair({
     maxTries: ENDPOINT_SAMPLING_MAX_TRIES,
     minMeters: CONFIG.minStartEndMeters,
-    randomKey: (rng) => randomCell(visibleBounds, rng),
-    toLatLon: (k) => cellLatLon(...Object.values(parseKey(k)), visibleBounds),
+    randomKey: (rng) => randomCell(simBounds, rng),
+    toLatLon: (k) => cellLatLon(...Object.values(parseKey(k)), simBounds),
   });
 
   startKey = sampled.startKey;
@@ -316,8 +344,8 @@ function pickEndpoints() {
     startKey,
     goalKey,
     neighbors: neighborsOf,
-    cost: (a, b) => cost(a, b, visibleBounds),
-    heuristic: (a, g2) => heuristic(a, g2, visibleBounds),
+    cost: (a, b) => cost(a, b, simBounds),
+    heuristic: (a, g2) => heuristic(a, g2, simBounds),
   });
 
   currentStep = null;
@@ -466,8 +494,8 @@ function buildBackground(bctx, w, h) {
 
 function cellToXY(k, w, h) {
   const { i, j } = parseKey(k);
-  const ll = cellLatLon(i, j, visibleBounds);
-  return project(ll.lat, ll.lon, visibleBounds, w, h);
+  const ll = cellLatLon(i, j, simBounds);
+  return project(ll.lat, ll.lon, simBounds, w, h);
 }
 
 function norm01(v, lo, hi) {
@@ -721,7 +749,7 @@ function tick(now) {
       if (r.done) {
         if (r.status === "found") {
           // optional bounds enforcement
-          if (CONFIG.discardIfPathLeavesBounds && pathLeavesBounds(r.path, visibleBounds)) {
+          if (CONFIG.discardIfPathLeavesBounds && pathLeavesBounds(r.path, simBounds)) {
             pickEndpoints();
             requestAnimationFrame(render);
             return;
