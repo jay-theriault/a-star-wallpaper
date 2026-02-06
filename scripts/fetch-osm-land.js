@@ -40,13 +40,17 @@ function buildQuery(bounds) {
   // Important: Boston Harbor and other large water bodies are often modeled as multipolygon relations.
   // Use `out geom` so we can build polygons without separately fetching nodes.
   return `[
-    out:json][timeout:120];
+    out:json][timeout:180];
     (
-      way["natural"="water"](${south},${west},${north},${east});
+      way["natural"~"water|bay"](${south},${west},${north},${east});
+      way["water"~"river|riverbank|canal|basin|harbour|reservoir|lake|pond|bay"](${south},${west},${north},${east});
       way["waterway"="riverbank"](${south},${west},${north},${east});
-      relation["type"="multipolygon"]["natural"="water"](${south},${west},${north},${east});
+
+      relation["type"="multipolygon"]["natural"~"water|bay"](${south},${west},${north},${east});
+      relation["type"="multipolygon"]["water"~"river|riverbank|canal|basin|harbour|reservoir|lake|pond|bay"](${south},${west},${north},${east});
       relation["type"="multipolygon"]["waterway"="riverbank"](${south},${west},${north},${east});
     );
+    (._;>;);
     out geom;`;
 }
 
@@ -75,13 +79,92 @@ function isClosedRing(coords) {
   return a && b && a[0] === b[0] && a[1] === b[1];
 }
 
-function wayGeomToRing(el) {
+function wayGeomToCoords(el) {
   const geom = el?.geometry;
-  if (!Array.isArray(geom) || geom.length < 4) return null;
+  if (!Array.isArray(geom) || geom.length < 2) return null;
   const coords = geom.map((p) => [p.lon, p.lat]).filter((c) => Number.isFinite(c[0]) && Number.isFinite(c[1]));
+  return coords.length >= 2 ? coords : null;
+}
+
+function wayGeomToRing(el) {
+  const coords = wayGeomToCoords(el);
+  if (!coords || coords.length < 4) return null;
   if (!isClosedRing(coords)) return null;
   const ring = simplifyRing(coords);
   return ring.length >= 4 ? ring : null;
+}
+
+function coordKey(c) {
+  // 1e-6 deg ~ 0.11m lat; good enough for endpoint matching.
+  return `${c[0].toFixed(6)},${c[1].toFixed(6)}`;
+}
+
+function reverseCoords(coords) {
+  const out = new Array(coords.length);
+  for (let i = 0; i < coords.length; i++) out[i] = coords[coords.length - 1 - i];
+  return out;
+}
+
+function stitchRingsFromOuterWays(rel, waysById) {
+  const segs = [];
+  for (const m of rel.members || []) {
+    if (m.type !== "way" || m.role !== "outer") continue;
+    const way = waysById.get(m.ref);
+    const coords = wayGeomToCoords(way);
+    if (coords) segs.push(coords);
+  }
+  if (!segs.length) return [];
+
+  // Greedy stitching: chain segments by matching endpoints.
+  const unused = segs.slice();
+  const rings = [];
+
+  while (unused.length) {
+    let ring = unused.pop();
+
+    let guard = 0;
+    while (guard++ < 10000) {
+      const startK = coordKey(ring[0]);
+      const endK = coordKey(ring[ring.length - 1]);
+      if (startK === endK && ring.length >= 4) break;
+
+      let merged = false;
+      for (let i = 0; i < unused.length; i++) {
+        const s = unused[i];
+        const sStartK = coordKey(s[0]);
+        const sEndK = coordKey(s[s.length - 1]);
+
+        if (endK === sStartK) {
+          ring = ring.concat(s.slice(1));
+        } else if (endK === sEndK) {
+          ring = ring.concat(reverseCoords(s).slice(1));
+        } else if (startK === sEndK) {
+          ring = s.concat(ring.slice(1));
+        } else if (startK === sStartK) {
+          ring = reverseCoords(s).concat(ring.slice(1));
+        } else {
+          continue;
+        }
+
+        unused.splice(i, 1);
+        merged = true;
+        break;
+      }
+
+      if (!merged) break;
+    }
+
+    if (ring.length >= 4) {
+      // Ensure closed
+      const startK = coordKey(ring[0]);
+      const endK = coordKey(ring[ring.length - 1]);
+      if (startK !== endK) ring = ring.concat([ring[0]]);
+      if (ring.length >= 4) rings.push(simplifyRing(ring));
+    }
+  }
+
+  // Keep only rings that are properly closed.
+  return rings.filter((r) => isClosedRing(r) && r.length >= 4);
 }
 
 function collectWaterPolygons(osm) {
@@ -135,9 +218,10 @@ function collectWaterPolygons(osm) {
     }
     if (!outers.length) continue;
 
-    // We store as MultiPolygon with one ring per member-outer (not stitched). This is imperfect but
-    // captures big water bodies like Boston Harbor where outers are already closed.
-    const coordinates = outers.map((ring) => [ring]);
+    const stitched = stitchRingsFromOuterWays(el, waysById);
+    if (!stitched.length) continue;
+
+    const coordinates = stitched.map((ring) => [ring]);
 
     features.push({
       type: "Feature",
