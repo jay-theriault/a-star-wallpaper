@@ -57,7 +57,7 @@ function clamp(v, lo, hi) {
 //   - showCurrent: 0|1 (default 1)
 //   - showPathDuringSearch: 0|1 (default 0)
 //   - showRoads: 0|1 (default 1)
-//   - showLand: 0|1 (default 1)
+//   - showTerrain: 0|1 (default 0)
 //   - roadsDetail: int [0,100] (default 70) (UI slider when HUD is enabled)
 //   - seed: string|int (deterministic endpoints)
 //   - centerLat / centerLon: float (override bbox center)
@@ -105,7 +105,7 @@ export const DEFAULT_CONFIG = {
   showCurrent: 1,
   showPathDuringSearch: 0,
   showRoads: 1,
-  showLand: 1,
+  showTerrain: 0,
   roadsDetail: 70,
   // Determinism + viewport control
   seed: null,
@@ -128,7 +128,7 @@ const PRESET_CONFIG = {
     showCurrent: 0,
     showPathDuringSearch: 0,
     showRoads: 1,
-    showLand: 1,
+    showTerrain: 0,
     roadsDetail: 70,
   },
   debug: {
@@ -141,7 +141,7 @@ const PRESET_CONFIG = {
     showCurrent: 1,
     showPathDuringSearch: 1,
     showRoads: 1,
-    showLand: 1,
+    showTerrain: 0,
     roadsDetail: 100,
   },
 };
@@ -234,7 +234,7 @@ export function parseRuntimeConfig(search) {
     showCurrent: read01("showCurrent", base.showCurrent),
     showPathDuringSearch: read01("showPathDuringSearch", base.showPathDuringSearch),
     showRoads: read01("showRoads", base.showRoads),
-    showLand: read01("showLand", base.showLand),
+    showTerrain: read01("showTerrain", base.showTerrain),
   };
 }
 
@@ -431,7 +431,7 @@ let roadsPointCache = { points: [], keys: [] };
 let roadGraph = null;
 let roadGraphReady = false;
 let showRoads = CONFIG.showRoads;
-let showLand = CONFIG.showLand;
+let showTerrain = CONFIG.showTerrain;
 let roadsDetail = CONFIG.roadsDetail;
 
 let helpVisible = false;
@@ -457,11 +457,24 @@ function initControls() {
   if (!controls || CONFIG.hud === 0) return;
 
   controls.innerHTML =
+    `<label style="display:flex;align-items:center;gap:8px;">` +
+    `<input id="showTerrain" type="checkbox" ${showTerrain ? "checked" : ""} />` +
+    `<b>Display terrain</b>` +
+    `</label>` +
+    `<div style="height:10px"></div>` +
     `<div><b>Road detail</b> <span class="dim">(coverage vs fidelity)</span></div>` +
     `<div style="display:flex;align-items:center;gap:10px;margin-top:6px;">` +
     `<input id="roadsDetail" type="range" min="0" max="100" step="1" value="${roadsDetail}" />` +
     `<span class="key" id="roadsDetailVal">${roadsDetail}</span>` +
     `</div>`;
+
+  const terrain = controls.querySelector("#showTerrain");
+  if (terrain) {
+    terrain.addEventListener("change", () => {
+      showTerrain = terrain.checked ? 1 : 0;
+      requestAnimationFrame(render);
+    });
+  }
 
   const slider = controls.querySelector("#roadsDetail");
   const label = controls.querySelector("#roadsDetailVal");
@@ -518,8 +531,13 @@ window.addEventListener("keydown", (e) => {
     showRoads = showRoads ? 0 : 1;
   }
 
-  if (e.key?.toLowerCase() === "l") {
-    showLand = showLand ? 0 : 1;
+  if (e.key?.toLowerCase() === "t") {
+    showTerrain = showTerrain ? 0 : 1;
+    if (controls && CONFIG.hud !== 0) {
+      const box = controls.querySelector("#showTerrain");
+      if (box) box.checked = !!showTerrain;
+    }
+    requestAnimationFrame(render);
   }
 
   if (e.key === "?") {
@@ -1563,7 +1581,7 @@ function render(now) {
   ctx.globalAlpha = 1;
   ctx.drawImage(bg, 0, 0, w, h);
 
-  if (showLand && landReady) {
+  if (showTerrain && landReady) {
     ctx.drawImage(landLayer, 0, 0, w, h);
   }
 
@@ -1678,7 +1696,7 @@ function render(now) {
       ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
       ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
       ` roads=<b>${showRoads ? 1 : 0}</b>` +
-      ` land=<b>${showLand ? 1 : 0}</b>`;
+      ` terrain=<b>${showTerrain ? 1 : 0}</b>`;
 
     hud.innerHTML =
       `<b>A*</b> Greater Boston <span class="dim">· graph ${graphLabel} · cycle ${cycle}</span><br/>` +
@@ -1699,7 +1717,7 @@ function render(now) {
       ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
       ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
       ` roads=<b>${showRoads ? 1 : 0}</b>` +
-      ` land=<b>${showLand ? 1 : 0}</b>`;
+      ` terrain=<b>${showTerrain ? 1 : 0}</b>`;
 
     const paramsLine =
       `mode=<b>${modeLabel}</b>` +
@@ -1713,10 +1731,10 @@ function render(now) {
 
     help.innerHTML =
       `<b>Help</b> <span class="dim">· toggle with ?</span><br/>` +
-      `<span class="dim">keys</span>: <span class="key">r</span> roads <span class="dim">·</span> <span class="key">l</span> land <span class="dim">·</span> <span class="key">?</span> help<br/>` +
+      `<span class="dim">keys</span>: <span class="key">r</span> roads <span class="dim">·</span> <span class="key">t</span> terrain <span class="dim">·</span> <span class="key">?</span> help<br/>` +
       `<span class="dim">toggles</span>: ${togglesLine}<br/>` +
       `<span class="dim">query params</span>: ${paramsLine}<br/>` +
-      `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, graph, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads, showLand`;
+      `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, graph, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads, showTerrain`;
   }
 
   requestAnimationFrame(tick);
