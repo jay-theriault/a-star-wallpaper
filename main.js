@@ -1,259 +1,38 @@
 import { haversineMeters, makeAStarStepper, reconstructPath } from './astar.js';
 import { DEFAULT_GUARDRAILS, updateGuardrails } from './guardrails.js';
 import { stepEndPhase } from './endPhase.js';
-import { extractRoadLines, extractRoadLinesWithMeta } from './roads-data.js';
+import { extractRoadLinesWithMeta } from './roads-data.js';
 import {
   buildRoadGraph,
   graphNodeLatLon,
   randomGraphNode,
   parseRoadGraphCache,
 } from './road-graph.js';
-
-// --- Spec-driven constants (initial proposal; tweak later) ---
-const BOUNDS = {
-  north: 42.55,
-  south: 42.2,
-  west: -71.35,
-  east: -70.85,
-};
-
-const THEME = {
-  // Treat the base background gradient as "ocean" so land tint + water polygons read distinctly.
-  bg0: '#050a12',
-  bg1: '#07162a',
-  grid: 'rgba(255,255,255,0.035)',
-  road: 'rgba(210,225,255,0.055)',
-  roadDash: 'rgba(255,255,255,0.08)',
-  osmRoad: 'rgba(90,100,110,0.45)',
-  // Land tint on top of ocean background.
-  landFill: 'rgba(40, 110, 70, 0.18)',
-  // Water polygons (rivers/harbor) on top of land tint.
-  waterFill: 'rgba(45, 140, 210, 0.22)',
-
-  // Tuned for legibility on dark background (open/closed/current are distinct).
-  open: '#22d3ee', // cyan
-  closed: '#fbbf24', // amber
-  current: '#ffffff',
-
-  // Edge-based explored roads color (gold).
-  explored: 'rgba(251, 191, 36, 0.55)',
-
-  pathCore: 'rgba(56, 189, 248, 0.9)',
-  pathGlow: 'rgba(70, 245, 255, 0.42)',
-
-  start: '#34d399',
-  goal: '#fb7185',
-};
-
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-// --- Runtime configuration (query params) ---
-//
-// Supported query params (invalid values fall back to defaults):
-//   - mode: chill|debug (preset bundle)
-//   - sps: integer [1, 120] (steps per second)
-//   - zoom: float [0.5, 2.0]
-//   - hud: 0|1
-//   - endHoldMs: int [0, 60000]
-//   - endAnimMs: int [0, 60000] (legacy total; split into trace+glow)
-//   - endTraceMs: int [0, 60000]
-//   - endGlowMs: int [0, 60000]
-//   - minStartEndMeters: int [0, 200000]
-//   - showOpenClosed: 0|1 (default 1)
-//   - showCurrent: 0|1 (default 1)
-//   - showPathDuringSearch: 0|1 (default 0)
-//   - showRoads: 0|1 (default 1)
-//   - showTerrain: 0|1 (default 0)
-//   - roadsDetail: int [0,100] (default 70) (UI slider when HUD is enabled)
-//   - seed: string|int (deterministic endpoints)
-//   - centerLat / centerLon: float (override bbox center)
-//   - maxStepsPerFrame: int [1, 500] (default 60)
-//   - endpointMode: roads|random (default roads)
-//   - graph: roads|grid (default roads)
-//   - showHud: 0|1 (alias for hud)
-//   - soak: 0|1 (default 0)
-
-export const DEFAULT_CONFIG = {
-  stepsPerSecond: 20,
-  maxStepsPerFrame: 60,
-
-  // hold after finding the path
-  endHoldMs: 1800,
-  // legacy total anim duration (kept for compatibility)
-  endAnimMs: 1200,
-  // end animation breakdown (trace + glow)
-  endTraceMs: 720,
-  endGlowMs: 480,
-
-  // grid density (prototype)
-  gridCols: 160,
-  gridRows: 100,
-
-  // visuals
-  gridEvery: 8,
-  pointSizePx: 3.0,
-  pointSoftness: 0.9,
-  roadMajorCount: 8,
-  roadMinorCount: 14,
-  roadCurviness: 0.35,
-  noiseAlpha: 0.06,
-  vignetteAlpha: 0.42,
-
-  minStartEndMeters: 7000,
-  discardIfPathLeavesBounds: true,
-  // Default to a much tighter view so we don't blow past render budgets on OSM data.
-  // (Area scales ~1/zoom^2, so zoom=5 is ~1/25th the area of zoom=1.)
-  zoom: 5.0,
-  hud: 1,
-
-  // viz toggles
-  showOpenClosed: 1,
-  showCurrent: 1,
-  showPathDuringSearch: 0,
-  showRoads: 1,
-  showTerrain: 0,
-  roadsDetail: 70,
-  // Determinism + viewport control
-  seed: null,
-  centerLat: null,
-  centerLon: null,
-
-  endpointMode: 'roads',
-  graph: 'roads',
-  soak: 0,
-};
-
-const PRESET_CONFIG = {
-  chill: {
-    stepsPerSecond: 12,
-    maxStepsPerFrame: 30,
-    endHoldMs: 3000,
-    endAnimMs: 2000,
-    hud: 0,
-    showOpenClosed: 0,
-    showCurrent: 0,
-    showPathDuringSearch: 0,
-    showRoads: 1,
-    showTerrain: 0,
-    roadsDetail: 70,
-  },
-  debug: {
-    stepsPerSecond: 45,
-    maxStepsPerFrame: 140,
-    endHoldMs: 900,
-    endAnimMs: 700,
-    hud: 1,
-    showOpenClosed: 1,
-    showCurrent: 1,
-    showPathDuringSearch: 1,
-    showRoads: 1,
-    showTerrain: 0,
-    roadsDetail: 100,
-  },
-};
-
-export function parseRuntimeConfig(search) {
-  const params = new URLSearchParams(search || '');
-
-  const modeRaw = params.get('mode');
-  const mode = modeRaw === 'chill' || modeRaw === 'debug' ? modeRaw : null;
-  const preset = mode ? PRESET_CONFIG[mode] : null;
-  const base = { ...DEFAULT_CONFIG, ...(preset || {}) };
-
-  const readInt = (name, def, lo, hi) => {
-    const raw = params.get(name);
-    if (raw == null) return def;
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n)) return def;
-    return clamp(Math.trunc(n), lo, hi);
-  };
-
-  const readFloat = (name, def, lo, hi) => {
-    const raw = params.get(name);
-    if (raw == null) return def;
-    const n = Number.parseFloat(raw);
-    if (!Number.isFinite(n)) return def;
-    return clamp(n, lo, hi);
-  };
-
-  const read01 = (name, def01) => {
-    const raw = params.get(name);
-    if (raw == null) return def01;
-    if (raw === '0') return 0;
-    if (raw === '1') return 1;
-    return def01;
-  };
-
-  const readEnum = (name, def, allowed) => {
-    const raw = params.get(name);
-    if (raw == null) return def;
-    return allowed.has(raw) ? raw : def;
-  };
-
-  const stepsPerSecond = readInt('sps', base.stepsPerSecond, 1, 120);
-  const maxStepsPerFrame = readInt('maxStepsPerFrame', base.maxStepsPerFrame, 1, 500);
-
-  const hud = read01('hud', read01('showHud', base.hud));
-  const endpointMode = readEnum('endpointMode', base.endpointMode, new Set(['roads', 'random']));
-  const graph = readEnum('graph', base.graph, new Set(['roads', 'grid']));
-  const soak = read01('soak', base.soak);
-  const roadsDetail = readInt('roadsDetail', base.roadsDetail, 0, 100);
-
-  const seed = params.get('seed') ?? base.seed;
-  const centerLatRaw = params.get('centerLat');
-  const centerLonRaw = params.get('centerLon');
-  const centerLat = centerLatRaw == null ? base.centerLat : Number.parseFloat(centerLatRaw);
-  const centerLon = centerLonRaw == null ? base.centerLon : Number.parseFloat(centerLonRaw);
-  const centerLatOk = Number.isFinite(centerLat);
-  const centerLonOk = Number.isFinite(centerLon);
-
-  // End animation timing
-  // - Legacy endAnimMs is still supported.
-  // - If endTraceMs/endGlowMs not provided, split endAnimMs 60/40 by default.
-  const endAnimMs = readInt('endAnimMs', base.endAnimMs, 0, 60000);
-  const endTraceMs = readInt('endTraceMs', Math.round(endAnimMs * 0.6), 0, 60000);
-  const endGlowMs = readInt('endGlowMs', Math.max(0, endAnimMs - endTraceMs), 0, 60000);
-
-  return {
-    ...base,
-    mode,
-    stepsPerSecond,
-    maxStepsPerFrame,
-    // use a delay to drive the fixed-rate stepping loop
-    stepDelayMs: 1000 / stepsPerSecond,
-    zoom: readFloat('zoom', base.zoom, 0.5, 50.0),
-    hud,
-    endpointMode,
-    graph,
-    soak,
-    roadsDetail,
-    seed,
-    centerLat: centerLatOk ? centerLat : null,
-    centerLon: centerLonOk ? centerLon : null,
-    endHoldMs: readInt('endHoldMs', base.endHoldMs, 0, 60000),
-    endAnimMs,
-    endTraceMs,
-    endGlowMs,
-    minStartEndMeters: readInt('minStartEndMeters', base.minStartEndMeters, 0, 200000),
-
-    showOpenClosed: read01('showOpenClosed', base.showOpenClosed),
-    showCurrent: read01('showCurrent', base.showCurrent),
-    showPathDuringSearch: read01('showPathDuringSearch', base.showPathDuringSearch),
-    showRoads: read01('showRoads', base.showRoads),
-    showTerrain: read01('showTerrain', base.showTerrain),
-  };
-}
+import { BOUNDS, THEME, clamp, parseRuntimeConfig } from './config.js';
+import { applyZoom, project } from './coordinates.js';
+import { ENDPOINT_SAMPLING_MAX_TRIES, sampleEndpointPair } from './endpoint-sampling.js';
+import {
+  inBoundsLatLon,
+  parseKey,
+  cellLatLon,
+  neighborsOf,
+  cost,
+  heuristic,
+  randomCell,
+} from './grid-helpers.js';
+import {
+  latLonToCellKey,
+  snapLatLonToRoadPoint,
+  buildRoadPointCacheFromGeojson,
+  buildRoadPointCacheFromGraph,
+} from './road-point-cache.js';
+import { extractLandPolys, extractCoastlineLines, extractParksPolys } from './terrain-data.js';
 
 const CONFIG = parseRuntimeConfig(typeof window !== 'undefined' ? window.location?.search : '');
 const CENTER_OVERRIDE =
   CONFIG.centerLat != null && CONFIG.centerLon != null
     ? { lat: CONFIG.centerLat, lon: CONFIG.centerLon }
     : null;
-
-// --- Endpoint sampling ---
-export const ENDPOINT_SAMPLING_MAX_TRIES = 5000;
 
 const MAX_RENDER_NODES_PER_SET = 3500;
 // Safety cap for pre-rendering OSM roads into an offscreen canvas.
@@ -263,162 +42,6 @@ const MAX_ROAD_SEGMENTS = 1200000;
 const MIN_ROAD_SEGMENTS = 150000;
 const MAX_SEGMENTS_PER_LINE_HI = 6000;
 const MAX_SEGMENTS_PER_LINE_LO = 1200;
-const ROAD_POINT_STRIDE = 2;
-const MAX_ROAD_POINTS = 7000;
-
-/**
- * Attempt to sample endpoints that satisfy `minMeters` for up to `maxTries`.
- * If not possible, returns the best-effort (max-distance) pair found.
- *
- * Pure/testable: pass in `randomKey`, `toLatLon`, and optionally `rng`.
- */
-export function sampleEndpointPair({
-  randomKey,
-  toLatLon,
-  minMeters,
-  maxTries = ENDPOINT_SAMPLING_MAX_TRIES,
-  rng = Math.random,
-  distanceFn = haversineMeters,
-}) {
-  let best = {
-    startKey: null,
-    goalKey: null,
-    distanceMeters: -Infinity,
-    minDistanceMet: false,
-    tries: 0,
-  };
-
-  for (let tries = 0; tries < maxTries; tries++) {
-    const startKey = randomKey(rng);
-    const goalKey = randomKey(rng);
-    const sLL = toLatLon(startKey);
-    const gLL = toLatLon(goalKey);
-    const d = distanceFn(sLL, gLL);
-
-    if (d > best.distanceMeters)
-      best = {
-        startKey,
-        goalKey,
-        distanceMeters: d,
-        minDistanceMet: d >= minMeters,
-        tries: tries + 1,
-      };
-
-    if (d >= minMeters) {
-      return { startKey, goalKey, distanceMeters: d, minDistanceMet: true, tries: tries + 1 };
-    }
-  }
-
-  return best;
-}
-
-// --- Roads + grid helpers (shared with tests) ---
-function inBoundsLatLon(lat, lon, bounds) {
-  return lat <= bounds.north && lat >= bounds.south && lon >= bounds.west && lon <= bounds.east;
-}
-
-function key(i, j) {
-  return `${i},${j}`;
-}
-function parseKey(k) {
-  const [i, j] = k.split(',').map((n) => parseInt(n, 10));
-  return { i, j };
-}
-
-export function latLonToCellKey(lat, lon, bounds, cols = CONFIG.gridCols, rows = CONFIG.gridRows) {
-  if (!inBoundsLatLon(lat, lon, bounds)) return null;
-  const i = Math.floor(((lon - bounds.west) / (bounds.east - bounds.west)) * cols);
-  const j = Math.floor(((bounds.north - lat) / (bounds.north - bounds.south)) * rows);
-  if (i < 0 || j < 0 || i >= cols || j >= rows) return null;
-  return key(i, j);
-}
-
-export function snapLatLonToRoadPoint(lat, lon, roadPoints) {
-  if (!roadPoints || roadPoints.length === 0) return null;
-  let best = null;
-  let bestD = Infinity;
-  for (const p of roadPoints) {
-    const d = (p.lat - lat) * (p.lat - lat) + (p.lon - lon) * (p.lon - lon);
-    if (d < bestD) {
-      bestD = d;
-      best = p;
-    }
-  }
-  return best;
-}
-
-// extractRoadLines moved to roads-data.js
-
-export function buildRoadPointCacheFromGeojson(
-  geojson,
-  bounds,
-  cols = CONFIG.gridCols,
-  rows = CONFIG.gridRows,
-  { stride = ROAD_POINT_STRIDE, maxPoints = MAX_ROAD_POINTS } = {},
-) {
-  const lines = extractRoadLines(geojson);
-  const points = [];
-
-  for (const line of lines) {
-    if (!line || line.length < 2) continue;
-    for (let i = 0; i < line.length; i += Math.max(1, stride)) {
-      const [lon, lat] = line[i];
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      if (!inBoundsLatLon(lat, lon, bounds)) continue;
-      points.push({ lat, lon });
-    }
-  }
-
-  if (points.length > maxPoints) {
-    const step = Math.ceil(points.length / maxPoints);
-    const slim = [];
-    for (let i = 0; i < points.length; i += step) slim.push(points[i]);
-    points.length = 0;
-    points.push(...slim);
-  }
-
-  const keySet = new Set();
-  for (const p of points) {
-    const k = latLonToCellKey(p.lat, p.lon, bounds, cols, rows);
-    if (k) keySet.add(k);
-  }
-
-  return { points, keys: Array.from(keySet) };
-}
-
-export function buildRoadPointCacheFromGraph(
-  graph,
-  bounds,
-  cols = CONFIG.gridCols,
-  rows = CONFIG.gridRows,
-  { maxPoints = MAX_ROAD_POINTS } = {},
-) {
-  if (!graph?.nodes?.length) return { points: [], keys: [] };
-  const points = [];
-  for (const node of graph.nodes) {
-    const lat = node?.lat;
-    const lon = node?.lon;
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-    if (!inBoundsLatLon(lat, lon, bounds)) continue;
-    points.push({ lat, lon });
-  }
-
-  if (points.length > maxPoints) {
-    const step = Math.ceil(points.length / maxPoints);
-    const slim = [];
-    for (let i = 0; i < points.length; i += step) slim.push(points[i]);
-    points.length = 0;
-    points.push(...slim);
-  }
-
-  const keySet = new Set();
-  for (const p of points) {
-    const k = latLonToCellKey(p.lat, p.lon, bounds, cols, rows);
-    if (k) keySet.add(k);
-  }
-
-  return { points, keys: Array.from(keySet) };
-}
 
 // --- Canvas setup ---
 if (typeof window !== 'undefined') {
@@ -571,110 +194,6 @@ if (typeof window !== 'undefined') {
   loadLand();
   loadRoads();
 
-  // --- Coordinate helpers ---
-  function bboxCenter(bounds) {
-    return {
-      lat: (bounds.north + bounds.south) / 2,
-      lon: (bounds.east + bounds.west) / 2,
-    };
-  }
-
-  function applyZoom(bounds, zoom, centerOverride = null) {
-    const c = centerOverride || bboxCenter(bounds);
-    const latSpan = (bounds.north - bounds.south) / zoom;
-    const lonSpan = (bounds.east - bounds.west) / zoom;
-    return {
-      north: c.lat + latSpan / 2,
-      south: c.lat - latSpan / 2,
-      west: c.lon - lonSpan / 2,
-      east: c.lon + lonSpan / 2,
-    };
-  }
-
-  function project(lat, lon, simBounds, w, h) {
-    const c = bboxCenter(simBounds);
-    const cosLat = Math.cos((c.lat * Math.PI) / 180);
-
-    // Aspect-ratio-aware render framing:
-    // Treat 1° lon as cos(lat) "narrower" than 1° lat (equirectangular scale).
-    // Expand the axis that would otherwise stretch so the map letterboxes instead.
-    const latSpan = simBounds.north - simBounds.south;
-    const lonSpan = simBounds.east - simBounds.west;
-    const simAspect = (lonSpan * cosLat) / latSpan;
-    const viewAspect = w / h;
-
-    let renderLatSpan = latSpan;
-    let renderLonSpan = lonSpan;
-    if (viewAspect > simAspect) {
-      // viewport is wider → expand longitude span
-      renderLonSpan = (latSpan * viewAspect) / cosLat;
-    } else {
-      // viewport is taller → expand latitude span
-      renderLatSpan = (lonSpan * cosLat) / viewAspect;
-    }
-
-    const renderBounds = {
-      north: c.lat + renderLatSpan / 2,
-      south: c.lat - renderLatSpan / 2,
-      west: c.lon - renderLonSpan / 2,
-      east: c.lon + renderLonSpan / 2,
-    };
-
-    const x = (lon - renderBounds.west) / (renderBounds.east - renderBounds.west);
-    const y = (renderBounds.north - lat) / (renderBounds.north - renderBounds.south);
-    return { x: x * w, y: y * h };
-  }
-
-  // --- Grid graph (prototype) ---
-  // We map grid cells to lat/lon centers inside the bounds.
-  function cellLatLon(i, j, bounds) {
-    const lat = bounds.north - (j + 0.5) * ((bounds.north - bounds.south) / CONFIG.gridRows);
-    const lon = bounds.west + (i + 0.5) * ((bounds.east - bounds.west) / CONFIG.gridCols);
-    return { lat, lon };
-  }
-
-  function neighborsOf(k) {
-    const { i, j } = parseKey(k);
-    const out = [];
-    for (const [di, dj] of [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-      [1, 1],
-      [1, -1],
-      [-1, 1],
-      [-1, -1],
-    ]) {
-      const ni = i + di;
-      const nj = j + dj;
-      if (ni < 0 || nj < 0 || ni >= CONFIG.gridCols || nj >= CONFIG.gridRows) continue;
-      out.push(key(ni, nj));
-    }
-    return out;
-  }
-
-  function cost(aKey, bKey, bounds) {
-    const a = cellLatLon(...Object.values(parseKey(aKey)), bounds);
-    const b = cellLatLon(...Object.values(parseKey(bKey)), bounds);
-    return haversineMeters(a, b);
-  }
-
-  function heuristic(aKey, goalKey, bounds) {
-    const a = cellLatLon(...Object.values(parseKey(aKey)), bounds);
-    const g = cellLatLon(...Object.values(parseKey(goalKey)), bounds);
-    return haversineMeters(a, g);
-  }
-
-  function randomCell(bounds, rng = Math.random) {
-    // uniform in grid for prototype
-    const i = Math.floor(rng() * CONFIG.gridCols);
-    const j = Math.floor(rng() * CONFIG.gridRows);
-    const ll = cellLatLon(i, j, bounds);
-    if (!inBoundsLatLon(ll.lat, ll.lon, bounds)) return randomCell(bounds, rng);
-    return key(i, j);
-  }
-
   function randomRoadKey(rng = Math.random) {
     if (!roadsPointCache?.keys?.length) return null;
     return roadsPointCache.keys[Math.floor(rng() * roadsPointCache.keys.length)];
@@ -711,7 +230,7 @@ if (typeof window !== 'undefined') {
       return graphNodeLatLon(roadGraph, k);
     }
     const { i, j } = parseKey(k);
-    return cellLatLon(i, j, bounds);
+    return cellLatLon(i, j, bounds, CONFIG.gridCols, CONFIG.gridRows);
   }
 
   let graphProjectionCache = {
@@ -819,12 +338,23 @@ if (typeof window !== 'undefined') {
       if (useRoadGraph) return randomGraphNode(roadGraph, rng);
       if (useRoadKeys) return randomRoadKey(rng);
 
-      let k = randomCell(simBounds, rng);
+      let k = randomCell(simBounds, CONFIG.gridCols, CONFIG.gridRows, rng);
       if (CONFIG.endpointMode === 'random' && roadsPointCache.points.length > 0) {
-        const ll = cellLatLon(...Object.values(parseKey(k)), simBounds);
+        const ll = cellLatLon(
+          ...Object.values(parseKey(k)),
+          simBounds,
+          CONFIG.gridCols,
+          CONFIG.gridRows,
+        );
         const snapped = snapLatLonToRoadPoint(ll.lat, ll.lon, roadsPointCache.points);
         if (snapped) {
-          const snappedKey = latLonToCellKey(snapped.lat, snapped.lon, simBounds);
+          const snappedKey = latLonToCellKey(
+            snapped.lat,
+            snapped.lon,
+            simBounds,
+            CONFIG.gridCols,
+            CONFIG.gridRows,
+          );
           if (snappedKey) k = snappedKey;
         }
       }
@@ -871,9 +401,9 @@ if (typeof window !== 'undefined') {
       stepper = makeAStarStepper({
         startKey,
         goalKey,
-        neighbors: neighborsOf,
-        cost: (a, b) => cost(a, b, simBounds),
-        heuristic: (a, g2) => heuristic(a, g2, simBounds),
+        neighbors: (k) => neighborsOf(k, CONFIG.gridCols, CONFIG.gridRows),
+        cost: (a, b) => cost(a, b, simBounds, CONFIG.gridCols, CONFIG.gridRows),
+        heuristic: (a, g2) => heuristic(a, g2, simBounds, CONFIG.gridCols, CONFIG.gridRows),
       });
     }
 
@@ -976,33 +506,6 @@ if (typeof window !== 'undefined') {
   }
 
   // --- OSM land/water overlay ---
-  function extractLandPolys(geojson) {
-    const features = geojson?.features || [];
-    const polys = [];
-
-    for (const f of features) {
-      const kind = f?.properties?.kind === 'water' ? 'water' : 'land';
-      const geom = f?.geometry;
-      if (!geom) continue;
-
-      // For now we keep only water polygons. "Land" polygons from OSM landuse/natural tags are
-      // very patchy and tend to look blotchy; we instead paint a subtle global land tint.
-      if (kind !== 'water') continue;
-
-      if (geom.type === 'Polygon') {
-        const rings = geom.coordinates || [];
-        if (rings.length) polys.push({ kind, rings });
-      } else if (geom.type === 'MultiPolygon') {
-        const parts = geom.coordinates || [];
-        for (const rings of parts) {
-          if (rings?.length) polys.push({ kind, rings });
-        }
-      }
-    }
-
-    return polys;
-  }
-
   async function loadLand() {
     try {
       const [waterRes, coastRes, parksRes] = await Promise.all([
@@ -1031,34 +534,6 @@ if (typeof window !== 'undefined') {
     } catch (err) {
       console.warn('Failed to load land overlay', err);
     }
-  }
-
-  function extractCoastlineLines(geojson) {
-    const out = [];
-    const features = geojson?.features || [];
-    for (const f of features) {
-      const g = f?.geometry;
-      if (!g) continue;
-      if (g.type === 'LineString' && Array.isArray(g.coordinates)) out.push(g.coordinates);
-      if (g.type === 'MultiLineString' && Array.isArray(g.coordinates)) {
-        for (const line of g.coordinates) if (Array.isArray(line)) out.push(line);
-      }
-    }
-    return out;
-  }
-
-  function extractParksPolys(geojson) {
-    const out = [];
-    const features = geojson?.features || [];
-    for (const f of features) {
-      const g = f?.geometry;
-      if (!g) continue;
-      if (g.type === 'Polygon') out.push(g.coordinates);
-      if (g.type === 'MultiPolygon') {
-        for (const poly of g.coordinates || []) out.push(poly);
-      }
-    }
-    return out;
   }
 
   function buildCoastlineMask(w, h) {
@@ -1234,7 +709,12 @@ if (typeof window !== 'undefined') {
         if (cached) {
           roadGraph = cached;
           roadGraphReady = roadGraph.nodes.length > 0;
-          roadsPointCache = buildRoadPointCacheFromGraph(roadGraph, cacheBounds);
+          roadsPointCache = buildRoadPointCacheFromGraph(
+            roadGraph,
+            cacheBounds,
+            CONFIG.gridCols,
+            CONFIG.gridRows,
+          );
         }
       }
     } catch (err) {
@@ -1274,7 +754,12 @@ if (typeof window !== 'undefined') {
 
       // Ensure we have a point cache for snapping/endpoint sampling.
       if (!roadsPointCache.keys.length) {
-        roadsPointCache = buildRoadPointCacheFromGeojson(data, cacheBounds);
+        roadsPointCache = buildRoadPointCacheFromGeojson(
+          data,
+          cacheBounds,
+          CONFIG.gridCols,
+          CONFIG.gridRows,
+        );
       }
 
       if (

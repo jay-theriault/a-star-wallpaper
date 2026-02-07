@@ -1,7 +1,7 @@
-import test from "node:test";
-import assert from "node:assert/strict";
+import test from 'node:test';
+import assert from 'node:assert/strict';
 
-import { sampleEndpointPair } from "../main.js";
+import { sampleEndpointPair } from '../endpoint-sampling.js';
 
 function makeRng(values) {
   let i = 0;
@@ -12,8 +12,8 @@ function makeRng(values) {
   };
 }
 
-test("endpoint sampling: returns first pair that meets min distance within maxTries", () => {
-  const keys = ["A", "B", "C"]; // chosen via rng
+test('endpoint sampling: returns first pair that meets min distance within maxTries', () => {
+  const keys = ['A', 'B', 'C']; // chosen via rng
   const rng = makeRng([
     0.01, // A
     0.34, // B  -> try 1: A-B (distance 1) fails
@@ -42,13 +42,13 @@ test("endpoint sampling: returns first pair that meets min distance within maxTr
   assert.equal(r.tries, 2);
   assert.equal(r.distanceMeters, 100);
   assert.ok(
-    (r.startKey === "A" && r.goalKey === "C") || (r.startKey === "C" && r.goalKey === "A"),
-    "expected first satisfying pair to be A-C"
+    (r.startKey === 'A' && r.goalKey === 'C') || (r.startKey === 'C' && r.goalKey === 'A'),
+    'expected first satisfying pair to be A-C',
   );
 });
 
-test("endpoint sampling: when constraint cannot be met, returns max-distance pair and flags best-effort", () => {
-  const seq = ["A", "B", "A", "C", "B", "C"]; // 3 tries: AB, AC, BC
+test('endpoint sampling: when constraint cannot be met, returns max-distance pair and flags best-effort', () => {
+  const seq = ['A', 'B', 'A', 'C', 'B', 'C']; // 3 tries: AB, AC, BC
   const randomKey = () => seq.shift();
 
   const pos = {
@@ -70,7 +70,7 @@ test("endpoint sampling: when constraint cannot be met, returns max-distance pai
   assert.equal(r.distanceMeters, 9);
   assert.equal(new Set([r.startKey, r.goalKey]).size, 2);
   assert.ok(
-    (r.startKey === "A" && r.goalKey === "C") || (r.startKey === "C" && r.goalKey === "A"),
-    "expected best-effort max-distance pair to be A-C"
+    (r.startKey === 'A' && r.goalKey === 'C') || (r.startKey === 'C' && r.goalKey === 'A'),
+    'expected best-effort max-distance pair to be A-C',
   );
 });

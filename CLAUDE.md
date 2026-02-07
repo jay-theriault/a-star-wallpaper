@@ -70,7 +70,13 @@ Every todo must have validation criteria and test cases. See base.md skill for f
 ```
 a-star-wallpaper/
 ├── index.html               # Entry point (opens in browser/Lively)
-├── main.js                  # Canvas rendering, animation loop
+├── main.js                  # Canvas rendering, animation loop, simulation state
+├── config.js                # BOUNDS, THEME, DEFAULT_CONFIG, parseRuntimeConfig
+├── coordinates.js           # bboxCenter, applyZoom, project (pure math)
+├── endpoint-sampling.js     # sampleEndpointPair (pure, testable)
+├── grid-helpers.js          # Grid cell helpers: key, parseKey, cellLatLon, neighborsOf, cost, heuristic
+├── road-point-cache.js      # latLonToCellKey, snapLatLonToRoadPoint, buildRoadPointCache*
+├── terrain-data.js          # extractLandPolys, extractCoastlineLines, extractParksPolys
 ├── astar.js                 # A* algorithm implementation
 ├── road-graph.js            # OSM road graph loading/querying
 ├── roads-data.js            # Road segment data for rendering
@@ -150,3 +156,20 @@ When starting a new session:
 - OSM data lives in `data/osm/` (GeoJSON + compact JSON + graph cache)
 - Query params control runtime configuration (see README.md)
 - No external runtime dependencies — dev dependencies only for tooling
+
+## Code Conventions
+
+- **Module system**: ES modules (`import`/`export`), no bundler, no TypeScript
+- **File naming**: kebab-case (`road-graph.js`, `roads-data.js`)
+- **Function naming**: camelCase (`makeAStarStepper`, `parseRoadGraphCache`)
+- **Constant naming**: UPPER_SNAKE_CASE (`DEFAULT_CONFIG`, `BOUNDS`, `THEME`)
+- **Exports**: Named exports only — no default exports
+- **Imports**: Relative paths with `.js` extension (`"./astar.js"`)
+- **Tests**: Separate `tests/` directory, `*.test.js`, flat `test()` calls (no `describe` blocks)
+- **Test framework**: `node:test` + `node:assert/strict`
+- **Error handling**: Defensive null checks (`?.`, `?? default`), graceful fallbacks — no thrown exceptions in library code
+- **Comments**: Sparse, functional — explain "why" not "what"
+- **Browser guard**: `if (typeof window !== "undefined")` wraps all DOM/Canvas code in main.js
+- **No external runtime deps**: Zero `dependencies` in package.json — dev dependencies only for tooling
+- **Pure functions**: Design functions to be injectable/testable (e.g. `sampleEndpointPair` takes `rng`, `distanceFn` as params)
+- **Commit style**: Imperative subject, descriptive ("Coastline mask: seed ocean from east edge")

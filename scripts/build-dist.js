@@ -9,7 +9,21 @@ const dist = resolve(root, 'dist');
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(dist, { recursive: true });
 
-const files = ['index.html', 'main.js', 'astar.js'];
+const files = [
+  'index.html',
+  'main.js',
+  'astar.js',
+  'guardrails.js',
+  'endPhase.js',
+  'roads-data.js',
+  'road-graph.js',
+  'config.js',
+  'coordinates.js',
+  'endpoint-sampling.js',
+  'grid-helpers.js',
+  'road-point-cache.js',
+  'terrain-data.js',
+];
 for (const file of files) {
   cpSync(resolve(root, file), resolve(dist, file));
 }
