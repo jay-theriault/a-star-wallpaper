@@ -66,8 +66,8 @@ export function clamp(v, lo, hi) {
 //   - soak: 0|1 (default 0)
 
 export const DEFAULT_CONFIG = {
-  stepsPerSecond: 20,
-  maxStepsPerFrame: 60,
+  stepsPerSecond: 5,
+  maxStepsPerFrame: 15,
 
   // hold after finding the path
   endHoldMs: 1800,
