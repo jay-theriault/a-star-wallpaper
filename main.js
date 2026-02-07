@@ -43,6 +43,7 @@ const MAX_ROAD_SEGMENTS = 1200000;
 const MIN_ROAD_SEGMENTS = 150000;
 const MAX_SEGMENTS_PER_LINE_HI = 6000;
 const MAX_SEGMENTS_PER_LINE_LO = 1200;
+const MAX_CANVAS_PIXELS = 16_777_216; // 16M pixels — safe for all browsers
 
 // --- Canvas setup ---
 if (typeof window !== 'undefined') {
@@ -104,7 +105,7 @@ if (typeof window !== 'undefined') {
 
   function rebuildRoadsLayerSoon() {
     if (!roadsReady) return;
-    buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+    buildRoadsLayer(roadsCtx, window.innerWidth, window.innerHeight);
   }
 
   function initControls() {
@@ -156,34 +157,69 @@ if (typeof window !== 'undefined') {
 
   function resize() {
     dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(window.innerWidth * dpr);
-    canvas.height = Math.floor(window.innerHeight * dpr);
-    canvas.style.width = window.innerWidth + 'px';
-    canvas.style.height = window.innerHeight + 'px';
+    const cssW = window.innerWidth;
+    const cssH = window.innerHeight;
+    if (cssW * dpr * cssH * dpr > MAX_CANVAS_PIXELS) {
+      dpr = Math.max(1, Math.sqrt(MAX_CANVAS_PIXELS / (cssW * cssH)));
+    }
+
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // Build background at CSS-pixel resolution (we draw it 1:1 each frame).
-    bg.width = Math.max(1, Math.floor(window.innerWidth));
-    bg.height = Math.max(1, Math.floor(window.innerHeight));
-    buildBackground(bgCtx, bg.width, bg.height);
+    const w = Math.max(1, Math.floor(cssW));
+    const h = Math.max(1, Math.floor(cssH));
+    const physW = Math.max(1, Math.floor(cssW * dpr));
+    const physH = Math.max(1, Math.floor(cssH * dpr));
+
+    // Resize all offscreen layers to device-pixel resolution.
+    // Setting .width/.height resets the context transform, so we
+    // re-apply scale(dpr) after each so draw calls stay in CSS pixels.
+    bg.width = physW;
+    bg.height = physH;
+    bgCtx.scale(dpr, dpr);
+    buildBackground(bgCtx, w, h);
 
     buildNoise(noiseCtx);
     noisePattern = ctx.createPattern(noise, 'repeat');
 
-    roadsLayer.width = Math.max(1, Math.floor(window.innerWidth));
-    roadsLayer.height = Math.max(1, Math.floor(window.innerHeight));
-    if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+    roadsLayer.width = physW;
+    roadsLayer.height = physH;
+    roadsCtx.scale(dpr, dpr);
+    if (roadsReady) buildRoadsLayer(roadsCtx, w, h);
 
-    landLayer.width = Math.max(1, Math.floor(window.innerWidth));
-    landLayer.height = Math.max(1, Math.floor(window.innerHeight));
-    if (landReady) buildLandLayer(landCtx, landLayer.width, landLayer.height);
+    landLayer.width = physW;
+    landLayer.height = physH;
+    landCtx.scale(dpr, dpr);
+    if (landReady) buildLandLayer(landCtx, w, h);
 
-    exploredLayer.width = Math.max(1, Math.floor(window.innerWidth));
-    exploredLayer.height = Math.max(1, Math.floor(window.innerHeight));
+    exploredLayer.width = physW;
+    exploredLayer.height = physH;
+    exploredCtx.scale(dpr, dpr);
     exploredLayerStep = -1;
   }
-  window.addEventListener('resize', resize);
+
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(resize, 150);
+  });
   resize();
+
+  let dprMediaCleanup = null;
+  function listenForDprChange() {
+    dprMediaCleanup?.();
+    const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    const handler = () => {
+      listenForDprChange();
+      resize();
+    };
+    mq.addEventListener('change', handler, { once: true });
+    dprMediaCleanup = () => mq.removeEventListener('change', handler);
+  }
+  listenForDprChange();
 
   window.addEventListener('keydown', (e) => {
     if (e.key?.toLowerCase() === 'r') {
@@ -473,7 +509,7 @@ if (typeof window !== 'undefined') {
     currentStep = null;
     finalPath = null;
     lastSearchStep = null;
-    exploredCtx.clearRect(0, 0, exploredLayer.width, exploredLayer.height);
+    exploredCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     exploredLayerStep = -1;
     phase = 'search';
     phaseT = 0;
@@ -595,7 +631,7 @@ if (typeof window !== 'undefined') {
       }
 
       landReady = true;
-      buildLandLayer(landCtx, landLayer.width, landLayer.height);
+      buildLandLayer(landCtx, window.innerWidth, window.innerHeight);
     } catch (err) {
       console.warn('Failed to load land overlay', err);
     }
@@ -715,7 +751,7 @@ if (typeof window !== 'undefined') {
       if (!roadsReady) return;
 
       // Always build the roads layer from lines.
-      buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+      buildRoadsLayer(roadsCtx, window.innerWidth, window.innerHeight);
 
       // If we didn't get a cached road graph, build one from the lines (with oneway metadata).
       if (!roadGraphReady) {
@@ -1298,7 +1334,7 @@ if (typeof window !== 'undefined') {
       case 'roadsDetail':
         CONFIG.roadsDetail = parseInt(val, 10);
         roadsDetail = CONFIG.roadsDetail;
-        if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+        if (roadsReady) buildRoadsLayer(roadsCtx, window.innerWidth, window.innerHeight);
         break;
     }
   };
@@ -1310,5 +1346,18 @@ if (typeof window !== 'undefined') {
   window.livelyResume = function () {
     // Lively calls this when wallpaper becomes visible again
     lastStepAt = performance.now();
+  };
+
+  window.livelyWallpaperPlaybackChanged = function (data) {
+    try {
+      const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+      if (parsed.IsPaused) {
+        window.livelyPause();
+      } else {
+        window.livelyResume();
+      }
+    } catch (_) {
+      // Malformed Lively payload — ignore gracefully
+    }
   };
 }

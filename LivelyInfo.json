@@ -7,5 +7,6 @@
   "Author": "Jay Theriault",
   "License": "MIT",
   "Type": 1,
-  "FileName": "index.html"
+  "FileName": "index.html",
+  "Arguments": "--pause-event true"
 }
