@@ -17,6 +17,9 @@ credentials.json
 secrets.json
 service-account*.json
 
+# Local settings/config
+*.local.json
+
 # Local tooling
 .DS_Store
 npm-debug.log*
