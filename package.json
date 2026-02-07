@@ -1,7 +1,10 @@
 {
+  "name": "a-star-wallpaper",
+  "version": "1.0.0",
+  "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test",
+    "test": "node --test tests/*.test.js",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

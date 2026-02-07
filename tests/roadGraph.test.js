@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildRoadGraph, findNearestGraphNode, graphNodeLatLon } from '../road-graph.js';
+import {
+  buildRoadGraph,
+  findNearestGraphNode,
+  graphNodeLatLon,
+  largestComponent,
+} from '../road-graph.js';
 import { haversineMeters, makeAStarStepper } from '../astar.js';
 
 test('road graph: builds nodes/edges and finds shortest path', () => {
@@ -172,4 +177,39 @@ test('road graph: A* with oneway takes longer path around restriction', () => {
   assert.ok(result);
   assert.equal(result.status, 'found');
   assert.equal(result.path.length, 3, 'B→A via C should be 3 nodes (B→C→A)');
+});
+
+test('road graph: largestComponent returns the bigger component', () => {
+  // Component 1: 3 nodes (A-B-C chain)
+  const comp1 = [
+    [
+      [0, 0],
+      [1, 0],
+      [2, 0],
+    ],
+  ];
+  // Component 2: 2 nodes (D-E), far away so they don't merge
+  const comp2 = [
+    [
+      [50, 50],
+      [51, 50],
+    ],
+  ];
+
+  const graph = buildRoadGraph([...comp1, ...comp2], {
+    toleranceMeters: 0.1,
+    contract: false,
+  });
+
+  // Should have 5 nodes in 2 components
+  assert.equal(graph.nodes.length, 5);
+
+  const biggest = largestComponent(graph);
+  assert.equal(biggest.size, 3, 'largest component should have 3 nodes');
+
+  // The 3-node component contains nodes at lat 0
+  const biggestLats = [...biggest].map((id) => graph.nodes[id].lat);
+  for (const lat of biggestLats) {
+    assert.ok(Math.abs(lat) < 1, 'largest component nodes should be near lat 0');
+  }
 });

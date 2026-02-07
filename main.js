@@ -82,6 +82,7 @@ if (typeof window !== 'undefined') {
   let roadsPointCache = { points: [], keys: [] };
   let roadGraph = null;
   let roadGraphReady = false;
+  let cachedNeighborKeys = null;
   let reachableNodes = null; // Set of node IDs in the largest connected component
   let showRoads = CONFIG.showRoads;
   let showTerrain = CONFIG.showTerrain;
@@ -201,6 +202,13 @@ if (typeof window !== 'undefined') {
     if (e.key === '?') {
       helpVisible = !helpVisible;
       if (help) help.style.display = helpVisible ? 'block' : 'none';
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      lastStepAt = performance.now();
+      lastFrameAt = performance.now();
     }
   });
 
@@ -445,7 +453,8 @@ if (typeof window !== 'undefined') {
     endpointSamplingTries = sampled.tries;
 
     if (useRoadGraph) {
-      const neighborKeys = roadGraph.adjacency.map((edges) => edges.map((e) => e.to));
+      const neighborKeys =
+        cachedNeighborKeys || roadGraph.adjacency.map((edges) => edges.map((e) => e.to));
       stepper = makeAStarStepper({
         startKey,
         goalKey,
@@ -730,6 +739,7 @@ if (typeof window !== 'undefined') {
       // Pre-compute largest connected component so we only sample reachable nodes.
       if (roadGraphReady) {
         reachableNodes = largestComponent(roadGraph);
+        cachedNeighborKeys = roadGraph.adjacency.map((edges) => edges.map((e) => e.to));
       }
 
       // Ensure we have a point cache for snapping/endpoint sampling.
@@ -1085,7 +1095,7 @@ if (typeof window !== 'undefined') {
     if (now - lastHudUpdate > 200) {
       lastHudUpdate = now;
 
-      const openN = currentStep?.openSet?.size ?? 0;
+      const openN = currentStep?.openSize ?? 0;
       const closedN = currentStep?.closedSet?.size ?? 0;
       const steps = currentStep?.steps ?? 0;
 
@@ -1260,4 +1270,55 @@ if (typeof window !== 'undefined') {
   }
 
   requestAnimationFrame(tick);
+
+  // --- Lively Wallpaper integration ---
+  window.livelyPropertyListener = function (name, val) {
+    switch (name) {
+      case 'zoom':
+        CONFIG.zoom = parseFloat(val);
+        resize();
+        break;
+      case 'stepsPerSecond':
+        CONFIG.stepsPerSecond = parseInt(val, 10);
+        CONFIG.stepDelayMs = 1000 / CONFIG.stepsPerSecond;
+        break;
+      case 'maxStepsPerFrame':
+        CONFIG.maxStepsPerFrame = parseInt(val, 10);
+        break;
+      case 'showRoads':
+        showRoads = val === 'true' || val === true;
+        break;
+      case 'showTerrain':
+        showTerrain = val === 'true' || val === true;
+        break;
+      case 'showOpenClosed':
+        CONFIG.showOpenClosed = val === 'true' || val === true ? 1 : 0;
+        break;
+      case 'showCurrent':
+        CONFIG.showCurrent = val === 'true' || val === true ? 1 : 0;
+        break;
+      case 'hud':
+        CONFIG.hud = val === 'true' || val === true ? 1 : 0;
+        if (hud) hud.style.display = CONFIG.hud ? 'block' : 'none';
+        break;
+      case 'rotation':
+        CONFIG.rotation = parseFloat(val);
+        resize();
+        break;
+      case 'roadsDetail':
+        CONFIG.roadsDetail = parseFloat(val);
+        roadsDetail = CONFIG.roadsDetail;
+        if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+        break;
+    }
+  };
+
+  window.livelyPause = function () {
+    // Lively calls this when wallpaper is not visible
+  };
+
+  window.livelyResume = function () {
+    // Lively calls this when wallpaper becomes visible again
+    lastStepAt = performance.now();
+  };
 }
