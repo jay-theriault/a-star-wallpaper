@@ -357,7 +357,7 @@ if (typeof window !== 'undefined') {
 
     // Exclude upper-left corner box from endpoint sampling (avoids spawning under HUD).
     const excludeNorth = simBounds.south + 0.75 * (simBounds.north - simBounds.south);
-    const excludeEast = simBounds.west + 0.25 * (simBounds.east - simBounds.west);
+    const excludeEast = simBounds.west + 0.5 * (simBounds.east - simBounds.west);
 
     function inExclusionZone(lat, lon) {
       return lat > excludeNorth && lon < excludeEast;
