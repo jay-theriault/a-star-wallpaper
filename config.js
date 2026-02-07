@@ -58,6 +58,7 @@ export function clamp(v, lo, hi) {
 //   - roadsDetail: int [0,100] (default 70) (UI slider when HUD is enabled)
 //   - seed: string|int (deterministic endpoints)
 //   - centerLat / centerLon: float (override bbox center)
+//   - rotation: float [-180, 180] (clockwise degrees, default 15)
 //   - maxStepsPerFrame: int [1, 500] (default 60)
 //   - endpointMode: roads|random (default roads)
 //   - graph: roads|grid (default roads)
@@ -92,9 +93,7 @@ export const DEFAULT_CONFIG = {
 
   minStartEndMeters: 7000,
   discardIfPathLeavesBounds: true,
-  // Default to a much tighter view so we don't blow past render budgets on OSM data.
-  // (Area scales ~1/zoom^2, so zoom=5 is ~1/25th the area of zoom=1.)
-  zoom: 5.0,
+  zoom: 4.0,
   hud: 1,
 
   // viz toggles
@@ -106,8 +105,9 @@ export const DEFAULT_CONFIG = {
   roadsDetail: 70,
   // Determinism + viewport control
   seed: null,
-  centerLat: null,
-  centerLon: null,
+  centerLat: 42.3601,
+  centerLon: -71.0942,
+  rotation: 15,
 
   endpointMode: 'roads',
   graph: 'roads',
@@ -197,6 +197,7 @@ export function parseRuntimeConfig(search) {
   const centerLon = centerLonRaw == null ? base.centerLon : Number.parseFloat(centerLonRaw);
   const centerLatOk = Number.isFinite(centerLat);
   const centerLonOk = Number.isFinite(centerLon);
+  const rotation = readFloat('rotation', base.rotation ?? 0, -180, 180);
 
   // End animation timing
   // - Legacy endAnimMs is still supported.
@@ -221,6 +222,7 @@ export function parseRuntimeConfig(search) {
     seed,
     centerLat: centerLatOk ? centerLat : null,
     centerLon: centerLonOk ? centerLon : null,
+    rotation,
     endHoldMs: readInt('endHoldMs', base.endHoldMs, 0, 60000),
     endAnimMs,
     endTraceMs,
