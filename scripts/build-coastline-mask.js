@@ -82,8 +82,9 @@ async function main() {
     }
   }
 
-  // Connect all segment endpoints to form a continuous barrier chain.
-  // Greedy: repeatedly find the closest unmatched start to any unmatched end.
+  // Connect segment endpoints to form a continuous barrier for BFS containment.
+  // Chaining lines go into a separate grid so they block BFS but don't appear in output.
+  const chainBarrier = new Uint8Array(mw * mh);
   const starts = [];
   const ends = [];
   for (const line of lines) {
@@ -92,6 +93,7 @@ async function main() {
     ends.push(toPixel(line[line.length - 1][0], line[line.length - 1][1]));
   }
   const usedStart = new Uint8Array(starts.length);
+  let chainCount = 0;
   for (let e = 0; e < ends.length; e++) {
     let bestDist = Infinity;
     let bestIdx = -1;
@@ -107,9 +109,19 @@ async function main() {
     }
     if (bestIdx >= 0) {
       usedStart[bestIdx] = 1;
-      bresenham(ends[e].px, ends[e].py, starts[bestIdx].px, starts[bestIdx].py, barrier, mw, mh);
+      bresenham(
+        ends[e].px,
+        ends[e].py,
+        starts[bestIdx].px,
+        starts[bestIdx].py,
+        chainBarrier,
+        mw,
+        mh,
+      );
+      chainCount++;
     }
   }
+  console.log(`  ${chainCount} endpoint connections`);
 
   // Seal the top and bottom edges of the mask as barrier so the east-edge
   // BFS flood can't leak around the coastline's north/south extent.
@@ -136,7 +148,7 @@ async function main() {
   const push = (x, y) => {
     if (x < 0 || y < 0 || x >= mw || y >= mh) return;
     const idx = y * mw + x;
-    if (ocean[idx] || barrier[idx]) return;
+    if (ocean[idx] || barrier[idx] || chainBarrier[idx]) return;
     ocean[idx] = 1;
     qx[qTail] = x;
     qy[qTail] = y;
@@ -164,10 +176,11 @@ async function main() {
   for (let i = 0; i < mw * mh; i++) if (ocean[i]) oceanCount++;
   console.log(`  ${oceanCount} ocean pixels (${((oceanCount / (mw * mh)) * 100).toFixed(1)}%)`);
 
-  // 3) Write PNG: water/barrier = white opaque, land = transparent.
+  // 3) Write PNG: ocean = white opaque, land = transparent.
+  // Coastline barrier and chaining lines are NOT included — only BFS-confirmed ocean.
   const png = new PNG({ width: mw, height: mh });
   for (let i = 0; i < mw * mh; i++) {
-    const isWater = ocean[i] === 1 || barrier[i] === 1;
+    const isWater = ocean[i] === 1;
     const off = i * 4;
     if (isWater) {
       png.data[off] = 255;

@@ -608,11 +608,14 @@ if (typeof window !== 'undefined') {
   function buildLandLayer(lctx, w, h) {
     lctx.clearRect(0, 0, w, h);
 
-    // Default: everything is land.
+    // Apply the same rotation as makeProjector uses for polygons.
+    // Land fill covers everything, so we fill first, then rotate for mask + polys.
     lctx.fillStyle = THEME.landFill;
     lctx.fillRect(0, 0, w, h);
 
     // Punch out water using pre-baked coastline mask.
+    // The mask is in non-rotated equirectangular space, so we apply canvas rotation
+    // to match makeProjector's screen-space rotation.
     if (coastlineMaskImg) {
       const rb = getRenderBounds(simBounds, w, h);
       const mw = coastlineMaskImg.width;
@@ -634,6 +637,12 @@ if (typeof window !== 'undefined') {
 
       lctx.save();
       lctx.globalCompositeOperation = 'destination-out';
+      // Rotate around canvas center to match makeProjector's rotation.
+      if (CONFIG.rotation) {
+        lctx.translate(w / 2, h / 2);
+        lctx.rotate((CONFIG.rotation * Math.PI) / 180);
+        lctx.translate(-w / 2, -h / 2);
+      }
       lctx.drawImage(coastlineMaskImg, csx, csy, csw, csh, dx, dy, dw, dh);
       lctx.restore();
     }
