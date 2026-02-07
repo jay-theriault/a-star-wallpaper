@@ -1003,14 +1003,14 @@ if (typeof window !== 'undefined') {
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 7 + 3 * pulse, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 5 + 2 * pulse, 0, Math.PI * 2);
     ctx.stroke();
 
     // Core dot.
     ctx.globalAlpha = 0.95;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
