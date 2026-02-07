@@ -375,16 +375,7 @@ if (typeof window !== 'undefined') {
       east: simBounds.east - padLon,
     };
 
-    // Exclude upper-left corner box from endpoint sampling (avoids spawning under HUD).
-    const excludeNorth = simBounds.south + 0.75 * (simBounds.north - simBounds.south);
-    const excludeEast = simBounds.west + 0.5 * (simBounds.east - simBounds.west);
-
-    function inExclusionZone(lat, lon) {
-      return lat > excludeNorth && lon < excludeEast;
-    }
-
-    // Pre-filter graph nodes to padded bounds, excluding upper-left corner
-    // and nodes not in the largest connected component.
+    // Pre-filter graph nodes to padded bounds and largest connected component.
     let inBoundsNodeIds = null;
     if (useRoadGraph) {
       inBoundsNodeIds = [];
@@ -394,7 +385,6 @@ if (typeof window !== 'undefined') {
           node.lat <= samplingBounds.north &&
           node.lon >= samplingBounds.west &&
           node.lon <= samplingBounds.east &&
-          !inExclusionZone(node.lat, node.lon) &&
           (!reachableNodes || reachableNodes.has(node.id))
         ) {
           inBoundsNodeIds.push(node.id);

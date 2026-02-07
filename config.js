@@ -94,7 +94,7 @@ export const DEFAULT_CONFIG = {
   minStartEndMeters: 7000,
   discardIfPathLeavesBounds: true,
   zoom: 2.0,
-  hud: 1,
+  hud: 0,
 
   // viz toggles
   showOpenClosed: 1,
