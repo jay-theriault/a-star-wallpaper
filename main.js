@@ -989,17 +989,14 @@ if (typeof window !== 'undefined') {
     ctx.restore();
   }
 
-  function drawCurrent(k, w, h, now) {
+  function drawCurrent(k, w, h) {
     if (!k) return;
     const p = cellToXY(k, w, h);
-    const t = (now % 900) / 900;
-    const pulse = 0.5 - 0.5 * Math.cos(t * Math.PI * 2);
-
     ctx.save();
     ctx.globalCompositeOperation = 'source-over';
 
     // Ring.
-    ctx.globalAlpha = 0.45 + 0.35 * pulse;
+    ctx.globalAlpha = 0.7;
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -1062,7 +1059,7 @@ if (typeof window !== 'undefined') {
       }
 
       if (CONFIG.showCurrent !== 0) {
-        drawCurrent(currentStep.current, w, h, now);
+        drawCurrent(currentStep.current, w, h);
       }
     }
 
