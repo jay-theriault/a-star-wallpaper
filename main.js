@@ -1296,7 +1296,7 @@ if (typeof window !== 'undefined') {
         resize();
         break;
       case 'roadsDetail':
-        CONFIG.roadsDetail = parseFloat(val);
+        CONFIG.roadsDetail = parseInt(val, 10);
         roadsDetail = CONFIG.roadsDetail;
         if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
         break;
