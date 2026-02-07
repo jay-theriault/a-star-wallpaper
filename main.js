@@ -355,7 +355,26 @@ if (typeof window !== 'undefined') {
     const useRoadGraph = isRoadGraphActive();
     const useRoadKeys = CONFIG.endpointMode === 'roads' && roadsPointCache.keys.length > 0;
 
+    // Pre-filter graph nodes to simBounds so endpoints are always visible.
+    let inBoundsNodeIds = null;
+    if (useRoadGraph) {
+      inBoundsNodeIds = [];
+      for (const node of roadGraph.nodes) {
+        if (
+          node.lat >= simBounds.south &&
+          node.lat <= simBounds.north &&
+          node.lon >= simBounds.west &&
+          node.lon <= simBounds.east
+        ) {
+          inBoundsNodeIds.push(node.id);
+        }
+      }
+    }
+
     const randomKey = (rng) => {
+      if (useRoadGraph && inBoundsNodeIds.length > 0) {
+        return inBoundsNodeIds[Math.floor(rng() * inBoundsNodeIds.length)];
+      }
       if (useRoadGraph) return randomGraphNode(roadGraph, rng);
       if (useRoadKeys) return randomRoadKey(rng);
 
