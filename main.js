@@ -9,7 +9,7 @@ import {
   parseRoadGraphCache,
 } from './road-graph.js';
 import { BOUNDS, THEME, clamp, parseRuntimeConfig } from './config.js';
-import { applyZoom, project } from './coordinates.js';
+import { applyZoom, project, makeProjector } from './coordinates.js';
 import { ENDPOINT_SAMPLING_MAX_TRIES, sampleEndpointPair } from './endpoint-sampling.js';
 import {
   inBoundsLatLon,
@@ -251,9 +251,10 @@ if (typeof window !== 'undefined') {
     )
       return;
 
+    const proj = makeProjector(simBounds, w, h, CONFIG.rotation);
     const points = new Array(roadGraph.nodes.length);
     for (const node of roadGraph.nodes) {
-      points[node.id] = project(node.lat, node.lon, simBounds, w, h);
+      points[node.id] = proj(node.lat, node.lon);
     }
 
     graphProjectionCache = { key, points };
@@ -268,7 +269,7 @@ if (typeof window !== 'undefined') {
 
     const ll = keyToLatLon(k, simBounds);
     if (!ll) return { x: -1000, y: -1000 };
-    return project(ll.lat, ll.lon, simBounds, w, h);
+    return project(ll.lat, ll.lon, simBounds, w, h, CONFIG.rotation);
   }
 
   function pathLeavesBounds(pathKeys, bounds) {
@@ -554,12 +555,13 @@ if (typeof window !== 'undefined') {
     mctx.lineCap = 'round';
     mctx.lineJoin = 'round';
 
+    const maskProj = makeProjector(simBounds, mw, mh, CONFIG.rotation);
     for (const line of coastlineLines) {
       if (!line || line.length < 2) continue;
       mctx.beginPath();
       for (let i = 0; i < line.length; i++) {
         const [lon, lat] = line[i];
-        const p = project(lat, lon, simBounds, mw, mh);
+        const p = maskProj(lat, lon);
         if (i === 0) mctx.moveTo(p.x, p.y);
         else mctx.lineTo(p.x, p.y);
       }
@@ -653,6 +655,8 @@ if (typeof window !== 'undefined') {
       lctx.restore();
     }
 
+    const landProj = makeProjector(simBounds, w, h, CONFIG.rotation);
+
     // Water polygons on top.
     if (landPolys.length) {
       lctx.save();
@@ -663,7 +667,7 @@ if (typeof window !== 'undefined') {
           lctx.beginPath();
           for (let i = 0; i < ring.length; i++) {
             const [lon, lat] = ring[i];
-            const p = project(lat, lon, simBounds, w, h);
+            const p = landProj(lat, lon);
             if (i === 0) lctx.moveTo(p.x, p.y);
             else lctx.lineTo(p.x, p.y);
           }
@@ -685,7 +689,7 @@ if (typeof window !== 'undefined') {
           lctx.beginPath();
           for (let i = 0; i < ring.length; i++) {
             const [lon, lat] = ring[i];
-            const p = project(lat, lon, simBounds, w, h);
+            const p = landProj(lat, lon);
             if (i === 0) lctx.moveTo(p.x, p.y);
             else lctx.lineTo(p.x, p.y);
           }
@@ -825,6 +829,7 @@ if (typeof window !== 'undefined') {
       return (b.coords?.length ?? 0) - (a.coords?.length ?? 0);
     });
 
+    const roadsProj = makeProjector(simBounds, w, h, CONFIG.rotation);
     let segments = 0;
 
     for (const item of ordered) {
@@ -840,7 +845,7 @@ if (typeof window !== 'undefined') {
 
       for (let i = 0; i < line.length; i += stride) {
         const [lon, lat] = line[i];
-        const p = project(lat, lon, simBounds, w, h);
+        const p = roadsProj(lat, lon);
         if (first) {
           rctx.moveTo(p.x, p.y);
           first = false;

@@ -18,7 +18,7 @@ export function applyZoom(bounds, zoom, centerOverride = null) {
   };
 }
 
-export function project(lat, lon, simBounds, w, h) {
+export function project(lat, lon, simBounds, w, h, rotation = 0) {
   const c = bboxCenter(simBounds);
   const cosLat = Math.cos((c.lat * Math.PI) / 180);
 
@@ -47,7 +47,62 @@ export function project(lat, lon, simBounds, w, h) {
     east: c.lon + renderLonSpan / 2,
   };
 
-  const x = (lon - renderBounds.west) / (renderBounds.east - renderBounds.west);
-  const y = (renderBounds.north - lat) / (renderBounds.north - renderBounds.south);
-  return { x: x * w, y: y * h };
+  const px = ((lon - renderBounds.west) / (renderBounds.east - renderBounds.west)) * w;
+  const py = ((renderBounds.north - lat) / (renderBounds.north - renderBounds.south)) * h;
+
+  if (rotation !== 0) {
+    const theta = (rotation * Math.PI) / 180;
+    const cosR = Math.cos(theta);
+    const sinR = Math.sin(theta);
+    const cx = w / 2;
+    const cy = h / 2;
+    const dx = px - cx;
+    const dy = py - cy;
+    return { x: cx + dx * cosR - dy * sinR, y: cy + dx * sinR + dy * cosR };
+  }
+
+  return { x: px, y: py };
+}
+
+// Pre-compute projection invariants for batch use.
+// Returns a fast (lat, lon) => {x, y} function with cos/sin cached.
+export function makeProjector(simBounds, w, h, rotation = 0) {
+  const c = bboxCenter(simBounds);
+  const cosLat = Math.cos((c.lat * Math.PI) / 180);
+  const latSpan = simBounds.north - simBounds.south;
+  const lonSpan = simBounds.east - simBounds.west;
+  const simAspect = (lonSpan * cosLat) / latSpan;
+  const viewAspect = w / h;
+  let renderLatSpan = latSpan;
+  let renderLonSpan = lonSpan;
+  if (viewAspect > simAspect) {
+    renderLonSpan = (latSpan * viewAspect) / cosLat;
+  } else {
+    renderLatSpan = (lonSpan * cosLat) / viewAspect;
+  }
+  const north = c.lat + renderLatSpan / 2;
+  const west = c.lon - renderLonSpan / 2;
+  const east = c.lon + renderLonSpan / 2;
+  const invLon = 1 / (east - west);
+  const invLat = 1 / (north - (c.lat - renderLatSpan / 2));
+
+  if (rotation !== 0) {
+    const theta = (rotation * Math.PI) / 180;
+    const cosR = Math.cos(theta);
+    const sinR = Math.sin(theta);
+    const cx = w / 2;
+    const cy = h / 2;
+    return (lat, lon) => {
+      const px = (lon - west) * invLon * w;
+      const py = (north - lat) * invLat * h;
+      const dx = px - cx;
+      const dy = py - cy;
+      return { x: cx + dx * cosR - dy * sinR, y: cy + dx * sinR + dy * cosR };
+    };
+  }
+
+  return (lat, lon) => ({
+    x: (lon - west) * invLon * w,
+    y: (north - lat) * invLat * h,
+  });
 }
