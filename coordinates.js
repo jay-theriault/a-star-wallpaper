@@ -51,3 +51,31 @@ export function project(lat, lon, simBounds, w, h) {
   const y = (renderBounds.north - lat) / (renderBounds.north - renderBounds.south);
   return { x: x * w, y: y * h };
 }
+
+// Pre-compute projection invariants for batch use.
+// Returns a fast (lat, lon) => {x, y} function.
+export function makeProjector(simBounds, w, h) {
+  const c = bboxCenter(simBounds);
+  const cosLat = Math.cos((c.lat * Math.PI) / 180);
+  const latSpan = simBounds.north - simBounds.south;
+  const lonSpan = simBounds.east - simBounds.west;
+  const simAspect = (lonSpan * cosLat) / latSpan;
+  const viewAspect = w / h;
+  let renderLatSpan = latSpan;
+  let renderLonSpan = lonSpan;
+  if (viewAspect > simAspect) {
+    renderLonSpan = (latSpan * viewAspect) / cosLat;
+  } else {
+    renderLatSpan = (lonSpan * cosLat) / viewAspect;
+  }
+  const north = c.lat + renderLatSpan / 2;
+  const west = c.lon - renderLonSpan / 2;
+  const east = c.lon + renderLonSpan / 2;
+  const south = c.lat - renderLatSpan / 2;
+  const invLon = 1 / (east - west);
+  const invLat = 1 / (north - south);
+  return (lat, lon) => ({
+    x: (lon - west) * invLon * w,
+    y: (north - lat) * invLat * h,
+  });
+}

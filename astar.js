@@ -24,26 +24,112 @@ export function reconstructPath(cameFrom, currentKey) {
   return path;
 }
 
+// Binary min-heap keyed by priority (f-score).
+// O(log n) push/pop/decreaseKey, O(1) has/size.
+class MinHeap {
+  constructor() {
+    this._heap = []; // [{key, priority}]
+    this._index = new Map(); // key → index in _heap
+  }
+
+  get size() {
+    return this._heap.length;
+  }
+
+  has(key) {
+    return this._index.has(key);
+  }
+
+  push(key, priority) {
+    if (this._index.has(key)) {
+      this.decreaseKey(key, priority);
+      return;
+    }
+    const i = this._heap.length;
+    this._heap.push({ key, priority });
+    this._index.set(key, i);
+    this._bubbleUp(i);
+  }
+
+  pop() {
+    if (this._heap.length === 0) return undefined;
+    const top = this._heap[0];
+    const last = this._heap.pop();
+    this._index.delete(top.key);
+    if (this._heap.length > 0) {
+      this._heap[0] = last;
+      this._index.set(last.key, 0);
+      this._sinkDown(0);
+    }
+    return top.key;
+  }
+
+  decreaseKey(key, priority) {
+    const i = this._index.get(key);
+    if (i === undefined) return;
+    if (priority < this._heap[i].priority) {
+      this._heap[i].priority = priority;
+      this._bubbleUp(i);
+    }
+  }
+
+  // Return a Set of all keys (for backward-compatible openSet in step results)
+  keys() {
+    return new Set(this._heap.map((e) => e.key));
+  }
+
+  _bubbleUp(i) {
+    const heap = this._heap;
+    const idx = this._index;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (heap[i].priority >= heap[parent].priority) break;
+      idx.set(heap[i].key, parent);
+      idx.set(heap[parent].key, i);
+      const tmp = heap[i];
+      heap[i] = heap[parent];
+      heap[parent] = tmp;
+      i = parent;
+    }
+  }
+
+  _sinkDown(i) {
+    const heap = this._heap;
+    const idx = this._index;
+    const n = heap.length;
+    while (true) {
+      let smallest = i;
+      const left = 2 * i + 1;
+      const right = 2 * i + 2;
+      if (left < n && heap[left].priority < heap[smallest].priority) smallest = left;
+      if (right < n && heap[right].priority < heap[smallest].priority) smallest = right;
+      if (smallest === i) break;
+      idx.set(heap[i].key, smallest);
+      idx.set(heap[smallest].key, i);
+      const tmp = heap[i];
+      heap[i] = heap[smallest];
+      heap[smallest] = tmp;
+      i = smallest;
+    }
+  }
+}
+
 export function makeAStarStepper({
   startKey,
   goalKey,
   neighbors,
   cost,
   heuristic,
-  // Optional hooks (useful for road graphs later)
   isValidNode,
   maxSteps,
 }) {
-  // Open set stored as Set + O(n) best-pick each step.
-  // For this visual demo, simplicity > optimal perf.
-
-  const isValid = (k) => (typeof isValidNode === "function" ? !!isValidNode(k) : true);
+  const isValid = (k) => (typeof isValidNode === 'function' ? !!isValidNode(k) : true);
 
   // Fast-fail if start/goal invalid
   if (!isValid(startKey) || !isValid(goalKey)) {
     return {
       step() {
-        return { done: true, status: "invalid-endpoints" };
+        return { done: true, status: 'invalid-endpoints' };
       },
       getState() {
         return {
@@ -58,25 +144,13 @@ export function makeAStarStepper({
     };
   }
 
-  const openSet = new Set([startKey]);
+  const openHeap = new MinHeap();
   const closedSet = new Set();
   const cameFrom = new Map();
 
   const gScore = new Map([[startKey, 0]]);
   const fScore = new Map([[startKey, heuristic(startKey, goalKey)]]);
-
-  function lowestFInOpen() {
-    let bestKey = null;
-    let bestF = Infinity;
-    for (const k of openSet) {
-      const f = fScore.get(k) ?? Infinity;
-      if (f < bestF) {
-        bestF = f;
-        bestKey = k;
-      }
-    }
-    return bestKey;
-  }
+  openHeap.push(startKey, fScore.get(startKey));
 
   let done = false;
   let result = null;
@@ -88,16 +162,17 @@ export function makeAStarStepper({
 
       if (Number.isFinite(maxSteps) && steps >= maxSteps) {
         done = true;
-        result = { status: "max-steps", steps };
+        result = { status: 'max-steps', steps };
         return { done: true, ...result };
       }
 
-      const current = lowestFInOpen();
-      if (current == null) {
+      if (openHeap.size === 0) {
         done = true;
-        result = { status: "no-path", steps };
+        result = { status: 'no-path', steps };
         return { done: true, ...result };
       }
+
+      const current = openHeap.pop();
 
       steps += 1;
 
@@ -105,11 +180,10 @@ export function makeAStarStepper({
       if (current === goalKey) {
         done = true;
         const path = reconstructPath(cameFrom, current);
-        result = { status: "found", path, steps };
+        result = { status: 'found', path, steps };
         return { done: true, ...result };
       }
 
-      openSet.delete(current);
       closedSet.add(current);
 
       for (const nb of neighbors(current)) {
@@ -117,20 +191,26 @@ export function makeAStarStepper({
         if (closedSet.has(nb)) continue;
 
         const tentativeG = (gScore.get(current) ?? Infinity) + cost(current, nb);
-        if (!openSet.has(nb)) openSet.add(nb);
 
         if (tentativeG < (gScore.get(nb) ?? Infinity)) {
           cameFrom.set(nb, current);
           gScore.set(nb, tentativeG);
-          fScore.set(nb, tentativeG + heuristic(nb, goalKey));
+          const f = tentativeG + heuristic(nb, goalKey);
+          fScore.set(nb, f);
+          // push handles both insert and decreaseKey
+          openHeap.push(nb, f);
+        } else if (!openHeap.has(nb) && !closedSet.has(nb)) {
+          const f = (gScore.get(nb) ?? Infinity) + heuristic(nb, goalKey);
+          fScore.set(nb, f);
+          openHeap.push(nb, f);
         }
       }
 
       return {
         done: false,
-        status: "searching",
+        status: 'searching',
         current,
-        openSet,
+        openSet: openHeap.keys(),
         closedSet,
         cameFrom,
         gScore,
@@ -140,7 +220,7 @@ export function makeAStarStepper({
     },
 
     getState() {
-      return { openSet, closedSet, cameFrom, gScore, fScore, steps };
+      return { openSet: openHeap.keys(), closedSet, cameFrom, gScore, fScore, steps };
     },
   };
 }
