@@ -65,12 +65,18 @@ if (typeof window !== 'undefined') {
   let landPolys = []; // water polys (kind=water)
   let landReady = false;
 
+  const exploredLayer = document.createElement('canvas');
+  const exploredCtx = exploredLayer.getContext('2d', { alpha: true });
+  let exploredLayerStep = -1;
+
+  let noisePattern = null;
+  let lastHudUpdate = 0;
+
   let coastlineLines = []; // [[lon,lat]...]
   let parksPolys = []; // polygons (geojson-style coords)
 
   let roadsLines = [];
   let roadsLinesMeta = [];
-  let roadsGraph = null;
   let roadsReady = false;
   let roadsPointCache = { points: [], keys: [] };
   let roadGraph = null;
@@ -159,6 +165,7 @@ if (typeof window !== 'undefined') {
     buildBackground(bgCtx, bg.width, bg.height);
 
     buildNoise(noiseCtx);
+    noisePattern = ctx.createPattern(noise, 'repeat');
 
     roadsLayer.width = Math.max(1, Math.floor(window.innerWidth));
     roadsLayer.height = Math.max(1, Math.floor(window.innerHeight));
@@ -167,6 +174,10 @@ if (typeof window !== 'undefined') {
     landLayer.width = Math.max(1, Math.floor(window.innerWidth));
     landLayer.height = Math.max(1, Math.floor(window.innerHeight));
     if (landReady) buildLandLayer(landCtx, landLayer.width, landLayer.height);
+
+    exploredLayer.width = Math.max(1, Math.floor(window.innerWidth));
+    exploredLayer.height = Math.max(1, Math.floor(window.innerHeight));
+    exploredLayerStep = -1;
   }
   window.addEventListener('resize', resize);
   resize();
@@ -383,10 +394,11 @@ if (typeof window !== 'undefined') {
     endpointSamplingTries = sampled.tries;
 
     if (useRoadGraph) {
+      const neighborKeys = roadGraph.adjacency.map((edges) => edges.map((e) => e.to));
       stepper = makeAStarStepper({
         startKey,
         goalKey,
-        neighbors: (k) => roadGraph.adjacency[k].map((edge) => edge.to),
+        neighbors: (k) => neighborKeys[k],
         cost: (a, b) => {
           const w = roadGraph.costMaps[a]?.get(b);
           if (Number.isFinite(w)) return w;
@@ -411,6 +423,8 @@ if (typeof window !== 'undefined') {
     currentStep = null;
     finalPath = null;
     lastSearchStep = null;
+    exploredCtx.clearRect(0, 0, exploredLayer.width, exploredLayer.height);
+    exploredLayerStep = -1;
     phase = 'search';
     phaseT = 0;
     lastStepAt = performance.now();
@@ -867,15 +881,16 @@ if (typeof window !== 'undefined') {
     return keyToXY(k, w, h);
   }
 
-  function drawExploredEdges(step, w, h, budget = MAX_RENDER_NODES_PER_SET) {
+  function renderExploredEdgesToLayer(step, w, h, budget = MAX_RENDER_NODES_PER_SET) {
     if (!step?.closedSet || !step?.cameFrom) return;
 
-    ctx.save();
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.strokeStyle = THEME.explored;
-    ctx.lineWidth = 2;
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    exploredCtx.clearRect(0, 0, w, h);
+    exploredCtx.save();
+    exploredCtx.globalCompositeOperation = 'source-over';
+    exploredCtx.strokeStyle = THEME.explored;
+    exploredCtx.lineWidth = 2;
+    exploredCtx.lineCap = 'round';
+    exploredCtx.lineJoin = 'round';
 
     const total = step.closedSet.size ?? 0;
     const limit = Math.min(budget, MAX_RENDER_NODES_PER_SET);
@@ -883,7 +898,7 @@ if (typeof window !== 'undefined') {
     let idx = 0;
     let drawn = 0;
 
-    ctx.beginPath();
+    exploredCtx.beginPath();
     for (const k of step.closedSet) {
       if (stride > 1 && idx % stride !== 0) {
         idx += 1;
@@ -898,12 +913,12 @@ if (typeof window !== 'undefined') {
 
       const p1 = cellToXY(k, w, h);
       const p2 = cellToXY(pred, w, h);
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
+      exploredCtx.moveTo(p1.x, p1.y);
+      exploredCtx.lineTo(p2.x, p2.y);
     }
-    ctx.stroke();
+    exploredCtx.stroke();
 
-    ctx.restore();
+    exploredCtx.restore();
   }
 
   function strokePath(keys, w, h, count) {
@@ -1025,16 +1040,23 @@ if (typeof window !== 'undefined') {
     }
 
     // Film grain.
-    ctx.save();
-    ctx.globalAlpha = CONFIG.noiseAlpha;
-    ctx.globalCompositeOperation = 'overlay';
-    ctx.fillStyle = ctx.createPattern(noise, 'repeat');
-    ctx.fillRect(0, 0, w, h);
-    ctx.restore();
+    if (noisePattern) {
+      ctx.save();
+      ctx.globalAlpha = CONFIG.noiseAlpha;
+      ctx.globalCompositeOperation = 'overlay';
+      ctx.fillStyle = noisePattern;
+      ctx.fillRect(0, 0, w, h);
+      ctx.restore();
+    }
 
     if (currentStep && currentStep.status === 'searching') {
       if (CONFIG.showOpenClosed !== 0) {
-        drawExploredEdges(currentStep, w, h);
+        const stepCount = currentStep.steps ?? 0;
+        if (stepCount !== exploredLayerStep) {
+          renderExploredEdgesToLayer(currentStep, w, h);
+          exploredLayerStep = stepCount;
+        }
+        ctx.drawImage(exploredLayer, 0, 0, w, h);
       }
 
       if (CONFIG.showPathDuringSearch !== 0) {
@@ -1051,8 +1073,9 @@ if (typeof window !== 'undefined') {
     }
 
     // Draw explored edges (gold) during end phases from saved search state.
+    // exploredLayer persists from final search step — just composite it.
     if (lastSearchStep && (phase === 'end-hold' || phase === 'end-trace' || phase === 'end-glow')) {
-      drawExploredEdges(lastSearchStep, w, h);
+      ctx.drawImage(exploredLayer, 0, 0, w, h);
     }
 
     if (finalPath) {
@@ -1075,100 +1098,104 @@ if (typeof window !== 'undefined') {
     drawMarker(startKey, w, h, THEME.start, 'rgba(52,211,153,0.55)');
     drawMarker(goalKey, w, h, THEME.goal, 'rgba(251,113,133,0.55)');
 
-    const openN = currentStep?.openSet?.size ?? 0;
-    const closedN = currentStep?.closedSet?.size ?? 0;
-    const steps = currentStep?.steps ?? 0;
+    if (now - lastHudUpdate > 200) {
+      lastHudUpdate = now;
 
-    const samplingLine =
-      `sample: <b>${Math.round(endpointSamplingDistanceMeters)}</b>m <span class="dim">·</span> tries: <b>${endpointSamplingTries}</b>` +
-      (endpointSamplingBestEffort
-        ? ` <span class="dim">·</span> <b style="color:#fb7185">min-distance not met; best-effort</b>`
-        : '');
+      const openN = currentStep?.openSet?.size ?? 0;
+      const closedN = currentStep?.closedSet?.size ?? 0;
+      const steps = currentStep?.steps ?? 0;
 
-    const avgSps =
-      soakStats.totalSearchMs > 0 ? soakStats.totalSteps / (soakStats.totalSearchMs / 1000) : 0;
-    const soakLine =
-      CONFIG.soak !== 0
-        ? ` <span class="dim">·</span> <span class="key">soak</span>: cycles=<b>${soakStats.cyclesCompleted}</b> fail=<b>${soakStats.failures}</b> resamp=<b>${soakStats.resamples}</b> avgSPS=<b>${avgSps.toFixed(1)}</b>` +
-          ` <span class="dim">·</span> gr(f=${guardrailState.consecutiveFailures},r=${guardrailState.consecutiveResamples},relax=${guardrailState.relaxCyclesRemaining})` +
-          (guardrailState.relaxCyclesRemaining > 0 ? ` <b style="color:#fbbf24">RELAXED</b>` : '')
-        : '';
+      const samplingLine =
+        `sample: <b>${Math.round(endpointSamplingDistanceMeters)}</b>m <span class="dim">·</span> tries: <b>${endpointSamplingTries}</b>` +
+        (endpointSamplingBestEffort
+          ? ` <span class="dim">·</span> <b style="color:#fb7185">min-distance not met; best-effort</b>`
+          : '');
 
-    const graphStats = isRoadGraphActive()
-      ? `<span class="key">graph</span>: <b>roads</b>` +
-        ` <span class="dim">·</span> <span class="key">nodes</span>: <b>${roadGraph.nodes.length}</b>` +
-        ` <span class="dim">·</span> <span class="key">edges</span>: <b>${roadGraph.edges}</b>`
-      : CONFIG.graph === 'roads'
+      const avgSps =
+        soakStats.totalSearchMs > 0 ? soakStats.totalSteps / (soakStats.totalSearchMs / 1000) : 0;
+      const soakLine =
+        CONFIG.soak !== 0
+          ? ` <span class="dim">·</span> <span class="key">soak</span>: cycles=<b>${soakStats.cyclesCompleted}</b> fail=<b>${soakStats.failures}</b> resamp=<b>${soakStats.resamples}</b> avgSPS=<b>${avgSps.toFixed(1)}</b>` +
+            ` <span class="dim">·</span> gr(f=${guardrailState.consecutiveFailures},r=${guardrailState.consecutiveResamples},relax=${guardrailState.relaxCyclesRemaining})` +
+            (guardrailState.relaxCyclesRemaining > 0 ? ` <b style="color:#fbbf24">RELAXED</b>` : '')
+          : '';
+
+      const graphStats = isRoadGraphActive()
         ? `<span class="key">graph</span>: <b>roads</b>` +
-          ` <span class="dim">·</span> <span class="key">nodes</span>: <b class="dim">loading</b>`
-        : `<span class="key">graph</span>: <b>grid</b>` +
-          ` <span class="dim">·</span> <span class="key">cells</span>: <b>${CONFIG.gridCols * CONFIG.gridRows}</b>`;
+          ` <span class="dim">·</span> <span class="key">nodes</span>: <b>${roadGraph.nodes.length}</b>` +
+          ` <span class="dim">·</span> <span class="key">edges</span>: <b>${roadGraph.edges}</b>`
+        : CONFIG.graph === 'roads'
+          ? `<span class="key">graph</span>: <b>roads</b>` +
+            ` <span class="dim">·</span> <span class="key">nodes</span>: <b class="dim">loading</b>`
+          : `<span class="key">graph</span>: <b>grid</b>` +
+            ` <span class="dim">·</span> <span class="key">cells</span>: <b>${CONFIG.gridCols * CONFIG.gridRows}</b>`;
 
-    const graphLabel = isRoadGraphActive()
-      ? 'roads'
-      : CONFIG.graph === 'roads'
-        ? 'roads (loading)'
-        : 'grid';
+      const graphLabel = isRoadGraphActive()
+        ? 'roads'
+        : CONFIG.graph === 'roads'
+          ? 'roads (loading)'
+          : 'grid';
 
-    const statsLine =
-      `<span class="key">path</span>: <b>${Math.round(lastPathLengthMeters)}</b>m` +
-      ` <span class="dim">·</span> ${graphStats}` +
-      ` <span class="dim">·</span> <span class="key">roads pts</span>: <b>${roadsPointCache.points.length}</b>` +
-      ` <span class="dim">·</span> <span class="key">endpointMode</span>: <b>${CONFIG.endpointMode}</b>` +
-      soakLine;
+      const statsLine =
+        `<span class="key">path</span>: <b>${Math.round(lastPathLengthMeters)}</b>m` +
+        ` <span class="dim">·</span> ${graphStats}` +
+        ` <span class="dim">·</span> <span class="key">roads pts</span>: <b>${roadsPointCache.points.length}</b>` +
+        ` <span class="dim">·</span> <span class="key">endpointMode</span>: <b>${CONFIG.endpointMode}</b>` +
+        soakLine;
 
-    if (hud && CONFIG.hud !== 0) {
-      const openClosedLine =
-        CONFIG.showOpenClosed !== 0
-          ? `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b>`
-          : `<span class="key">open/closed</span>: <b class="dim">hidden</b>`;
+      if (hud && CONFIG.hud !== 0) {
+        const openClosedLine =
+          CONFIG.showOpenClosed !== 0
+            ? `<span class="key">open</span>: <b>${openN}</b> <span class="dim">·</span> <span class="key">closed</span>: <b>${closedN}</b>`
+            : `<span class="key">open/closed</span>: <b class="dim">hidden</b>`;
 
-      const vizLine =
-        `<span class="dim">viz</span>:` +
-        ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
-        ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
-        ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
-        ` roads=<b>${showRoads ? 1 : 0}</b>` +
-        ` terrain=<b>${showTerrain ? 1 : 0}</b>`;
+        const vizLine =
+          `<span class="dim">viz</span>:` +
+          ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
+          ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
+          ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
+          ` roads=<b>${showRoads ? 1 : 0}</b>` +
+          ` terrain=<b>${showTerrain ? 1 : 0}</b>`;
 
-      hud.innerHTML =
-        `<b>A*</b> Greater Boston <span class="dim">· graph ${graphLabel} · cycle ${cycle}</span><br/>` +
-        `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
-        `${samplingLine}<br/>` +
-        `${statsLine}<br/>` +
-        `${openClosedLine}<br/>` +
-        `${vizLine}<br/>` +
-        `<span class="dim">cfg</span>: sps=<b>${CONFIG.stepsPerSecond}</b> maxStepsPerFrame=<b>${CONFIG.maxStepsPerFrame}</b> zoom=<b>${CONFIG.zoom.toFixed(2)}</b><br/>` +
-        `<span class="dim">cfg</span>: minDist=<b>${CONFIG.minStartEndMeters}</b>m`;
-    }
+        hud.innerHTML =
+          `<b>A*</b> Greater Boston <span class="dim">· graph ${graphLabel} · cycle ${cycle}</span><br/>` +
+          `phase: <b>${phase}</b> <span class="dim">·</span> steps: <b>${steps}</b><br/>` +
+          `${samplingLine}<br/>` +
+          `${statsLine}<br/>` +
+          `${openClosedLine}<br/>` +
+          `${vizLine}<br/>` +
+          `<span class="dim">cfg</span>: sps=<b>${CONFIG.stepsPerSecond}</b> maxStepsPerFrame=<b>${CONFIG.maxStepsPerFrame}</b> zoom=<b>${CONFIG.zoom.toFixed(2)}</b><br/>` +
+          `<span class="dim">cfg</span>: minDist=<b>${CONFIG.minStartEndMeters}</b>m`;
+      }
 
-    if (help) {
-      const modeLabel = CONFIG.mode ?? 'default';
-      const togglesLine =
-        `hud=<b>${CONFIG.hud ? 1 : 0}</b>` +
-        ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
-        ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
-        ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
-        ` roads=<b>${showRoads ? 1 : 0}</b>` +
-        ` terrain=<b>${showTerrain ? 1 : 0}</b>`;
+      if (help) {
+        const modeLabel = CONFIG.mode ?? 'default';
+        const togglesLine =
+          `hud=<b>${CONFIG.hud ? 1 : 0}</b>` +
+          ` openClosed=<b>${CONFIG.showOpenClosed ? 1 : 0}</b>` +
+          ` current=<b>${CONFIG.showCurrent ? 1 : 0}</b>` +
+          ` pathDuring=<b>${CONFIG.showPathDuringSearch ? 1 : 0}</b>` +
+          ` roads=<b>${showRoads ? 1 : 0}</b>` +
+          ` terrain=<b>${showTerrain ? 1 : 0}</b>`;
 
-      const paramsLine =
-        `mode=<b>${modeLabel}</b>` +
-        ` sps=<b>${CONFIG.stepsPerSecond}</b>` +
-        ` maxStepsPerFrame=<b>${CONFIG.maxStepsPerFrame}</b>` +
-        ` zoom=<b>${CONFIG.zoom.toFixed(2)}</b>` +
-        ` endHoldMs=<b>${CONFIG.endHoldMs}</b>` +
-        ` endAnimMs=<b>${CONFIG.endAnimMs}</b>` +
-        ` minStartEndMeters=<b>${CONFIG.minStartEndMeters}</b>` +
-        ` graph=<b>${CONFIG.graph}</b>`;
+        const paramsLine =
+          `mode=<b>${modeLabel}</b>` +
+          ` sps=<b>${CONFIG.stepsPerSecond}</b>` +
+          ` maxStepsPerFrame=<b>${CONFIG.maxStepsPerFrame}</b>` +
+          ` zoom=<b>${CONFIG.zoom.toFixed(2)}</b>` +
+          ` endHoldMs=<b>${CONFIG.endHoldMs}</b>` +
+          ` endAnimMs=<b>${CONFIG.endAnimMs}</b>` +
+          ` minStartEndMeters=<b>${CONFIG.minStartEndMeters}</b>` +
+          ` graph=<b>${CONFIG.graph}</b>`;
 
-      help.innerHTML =
-        `<b>Help</b> <span class="dim">· toggle with ?</span><br/>` +
-        `<span class="dim">keys</span>: <span class="key">r</span> roads <span class="dim">·</span> <span class="key">t</span> terrain <span class="dim">·</span> <span class="key">?</span> help<br/>` +
-        `<span class="dim">toggles</span>: ${togglesLine}<br/>` +
-        `<span class="dim">query params</span>: ${paramsLine}<br/>` +
-        `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, graph, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads, showTerrain`;
-    }
+        help.innerHTML =
+          `<b>Help</b> <span class="dim">· toggle with ?</span><br/>` +
+          `<span class="dim">keys</span>: <span class="key">r</span> roads <span class="dim">·</span> <span class="key">t</span> terrain <span class="dim">·</span> <span class="key">?</span> help<br/>` +
+          `<span class="dim">toggles</span>: ${togglesLine}<br/>` +
+          `<span class="dim">query params</span>: ${paramsLine}<br/>` +
+          `<span class="dim">query params</span>: mode, sps, maxStepsPerFrame, zoom, endHoldMs, endAnimMs, minStartEndMeters, graph, hud, showOpenClosed, showCurrent, showPathDuringSearch, showRoads, showTerrain`;
+      }
+    } // end HUD throttle
 
     requestAnimationFrame(tick);
   }
