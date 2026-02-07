@@ -1,0 +1,10 @@
+{
+  "format": "osm-road-graph",
+  "version": 2,
+  "options": { "toleranceMeters": 10 },
+  "nodes": [
+    { "lat": 0, "lon": 0 },
+    { "lat": 2, "lon": 0 }
+  ],
+  "edges": [[[1, 222000, [[1, 0]]]], [[0, 222000, [[1, 0]]]]]
+}

@@ -1,18 +1,19 @@
-export const COMPACT_ROADS_FORMAT = "osm-roads-compact";
+export const COMPACT_ROADS_FORMAT = 'osm-roads-compact';
 // v1: lines: number[] (flat lon/lat)
 // v2: lines: { h: string, c: number[] }[] (highway + flat lon/lat)
 export const COMPACT_ROADS_VERSION = 2;
 
 export function extractRoadLinesFromGeojson(geojson) {
   const lines = [];
-  if (!geojson || geojson.type !== "FeatureCollection" || !Array.isArray(geojson.features)) return lines;
+  if (!geojson || geojson.type !== 'FeatureCollection' || !Array.isArray(geojson.features))
+    return lines;
 
   for (const feature of geojson.features) {
     const geom = feature?.geometry;
     if (!geom) continue;
-    if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
+    if (geom.type === 'LineString' && Array.isArray(geom.coordinates)) {
       lines.push(geom.coordinates);
-    } else if (geom.type === "MultiLineString" && Array.isArray(geom.coordinates)) {
+    } else if (geom.type === 'MultiLineString' && Array.isArray(geom.coordinates)) {
       for (const line of geom.coordinates) {
         if (Array.isArray(line)) lines.push(line);
       }
@@ -24,18 +25,20 @@ export function extractRoadLinesFromGeojson(geojson) {
 
 export function extractRoadLinesWithMetaFromGeojson(geojson) {
   const lines = [];
-  if (!geojson || geojson.type !== "FeatureCollection" || !Array.isArray(geojson.features)) return lines;
+  if (!geojson || geojson.type !== 'FeatureCollection' || !Array.isArray(geojson.features))
+    return lines;
 
   for (const feature of geojson.features) {
     const geom = feature?.geometry;
     const highway = feature?.properties?.highway ?? null;
     if (!geom) continue;
 
-    if (geom.type === "LineString" && Array.isArray(geom.coordinates)) {
-      lines.push({ highway, coords: geom.coordinates });
-    } else if (geom.type === "MultiLineString" && Array.isArray(geom.coordinates)) {
+    const oneway = feature?.properties?.oneway ?? null;
+    if (geom.type === 'LineString' && Array.isArray(geom.coordinates)) {
+      lines.push({ highway, oneway, coords: geom.coordinates });
+    } else if (geom.type === 'MultiLineString' && Array.isArray(geom.coordinates)) {
       for (const line of geom.coordinates) {
-        if (Array.isArray(line)) lines.push({ highway, coords: line });
+        if (Array.isArray(line)) lines.push({ highway, oneway, coords: line });
       }
     }
   }
@@ -87,8 +90,9 @@ export function extractRoadLinesWithMetaFromCompact(data) {
 
     const coords = compactLineToCoords(line?.c);
     if (!coords) continue;
-    const highway = typeof line?.h === "string" ? line.h : null;
-    lines.push({ highway, coords });
+    const highway = typeof line?.h === 'string' ? line.h : null;
+    const oneway = line?.o ?? null;
+    lines.push({ highway, oneway, coords });
   }
 
   return lines;
