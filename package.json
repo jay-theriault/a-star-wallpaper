@@ -2,7 +2,30 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "build:dist": "node scripts/build-dist.js",
-    "build:road-graph": "node scripts/build-road-graph-cache.js"
+    "build:road-graph": "node scripts/build-road-graph-cache.js",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.js": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,html,css,md}": [
+      "prettier --write"
+    ]
+  },
+  "devDependencies": {
+    "@commitlint/config-conventional": "^20.4.1",
+    "@eslint/js": "^10.0.1",
+    "commitlint": "^20.4.1",
+    "eslint": "^10.0.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
+    "prettier": "^3.8.1"
   }
 }
