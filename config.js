@@ -6,14 +6,6 @@ export const BOUNDS = {
   east: -70.85,
 };
 
-// Pre-baked coastline mask covers BOUNDS + 0.2° margin on all sides.
-export const MASK_BOUNDS = {
-  north: BOUNDS.north + 0.2,
-  south: BOUNDS.south - 0.2,
-  west: BOUNDS.west - 0.2,
-  east: BOUNDS.east + 0.2,
-};
-
 export const THEME = {
   // Treat the base background gradient as "ocean" so land tint + water polygons read distinctly.
   bg0: '#050a12',

@@ -26,15 +26,15 @@ export function extractLandPolys(geojson) {
   return polys;
 }
 
-export function extractCoastlineLines(geojson) {
+export function extractLandMassPolys(geojson) {
   const out = [];
   const features = geojson?.features || [];
   for (const f of features) {
     const g = f?.geometry;
     if (!g) continue;
-    if (g.type === 'LineString' && Array.isArray(g.coordinates)) out.push(g.coordinates);
-    if (g.type === 'MultiLineString' && Array.isArray(g.coordinates)) {
-      for (const line of g.coordinates) if (Array.isArray(line)) out.push(line);
+    if (g.type === 'Polygon') out.push(g.coordinates);
+    if (g.type === 'MultiPolygon') {
+      for (const poly of g.coordinates || []) out.push(poly);
     }
   }
   return out;

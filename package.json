@@ -8,7 +8,7 @@
     "format:check": "prettier --check .",
     "build:dist": "node scripts/build-dist.js",
     "build:road-graph": "node scripts/build-road-graph-cache.js",
-    "build:coastline-mask": "node scripts/build-coastline-mask.js",
+    "fetch:land-polygons": "node scripts/fetch-land-polygons.js",
     "prepare": "husky"
   },
   "lint-staged": {
@@ -27,7 +27,6 @@
     "eslint": "^10.0.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
-    "pngjs": "^7.0.0",
     "prettier": "^3.8.1"
   }
 }
