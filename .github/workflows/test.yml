@@ -14,5 +14,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Check formatting
+        run: npm run format:check
       - name: Run tests
-        run: node --test
+        run: npm test

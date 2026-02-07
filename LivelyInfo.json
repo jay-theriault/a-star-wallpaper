@@ -1,0 +1,11 @@
+{
+  "AppVersion": "1.0.0",
+  "Title": "A* Pathfinding Wallpaper",
+  "Thumbnail": "",
+  "Preview": "",
+  "Desc": "Animated A* search visualization over Greater Boston road network",
+  "Author": "Jay Theriault",
+  "License": "MIT",
+  "Type": 1,
+  "FileName": "index.html"
+}

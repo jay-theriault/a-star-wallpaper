@@ -9,8 +9,8 @@ import {
   randomGraphNode,
   parseRoadGraphCache,
 } from './road-graph.js';
-import { BOUNDS, MASK_BOUNDS, THEME, clamp, parseRuntimeConfig } from './config.js';
-import { applyZoom, getRenderBounds, project, makeProjector } from './coordinates.js';
+import { BOUNDS, THEME, clamp, parseRuntimeConfig } from './config.js';
+import { applyZoom, project, makeProjector } from './coordinates.js';
 import { ENDPOINT_SAMPLING_MAX_TRIES, sampleEndpointPair } from './endpoint-sampling.js';
 import {
   inBoundsLatLon,
@@ -27,7 +27,7 @@ import {
   buildRoadPointCacheFromGeojson,
   buildRoadPointCacheFromGraph,
 } from './road-point-cache.js';
-import { extractLandPolys, extractParksPolys } from './terrain-data.js';
+import { extractLandPolys, extractLandMassPolys, extractParksPolys } from './terrain-data.js';
 
 const CONFIG = parseRuntimeConfig(typeof window !== 'undefined' ? window.location?.search : '');
 const CENTER_OVERRIDE =
@@ -56,7 +56,7 @@ if (typeof window !== 'undefined') {
   const ROADS_COMPACT_URL = './data/osm/roads.compact.json';
   const ROAD_GRAPH_URL = './data/osm/roadGraph.v2.json';
   const LAND_URL = './data/osm/land.geojson';
-  const COASTLINE_MASK_URL = './data/osm/coastline-mask.png';
+  const LAND_POLYS_URL = './data/osm/land-polygons.geojson';
   const PARKS_URL = './data/osm/parks.geojson';
   const roadsLayer = document.createElement('canvas');
   const roadsCtx = roadsLayer.getContext('2d', { alpha: true });
@@ -73,7 +73,7 @@ if (typeof window !== 'undefined') {
   let noisePattern = null;
   let lastHudUpdate = 0;
 
-  let coastlineMaskImg = null; // pre-baked coastline mask PNG
+  let landMassPolys = []; // pre-processed land polygons from osmdata
   let parksPolys = []; // polygons (geojson-style coords)
 
   let roadsLines = [];
@@ -82,6 +82,7 @@ if (typeof window !== 'undefined') {
   let roadsPointCache = { points: [], keys: [] };
   let roadGraph = null;
   let roadGraphReady = false;
+  let cachedNeighborKeys = null;
   let reachableNodes = null; // Set of node IDs in the largest connected component
   let showRoads = CONFIG.showRoads;
   let showTerrain = CONFIG.showTerrain;
@@ -201,6 +202,13 @@ if (typeof window !== 'undefined') {
     if (e.key === '?') {
       helpVisible = !helpVisible;
       if (help) help.style.display = helpVisible ? 'block' : 'none';
+    }
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      lastStepAt = performance.now();
+      lastFrameAt = performance.now();
     }
   });
 
@@ -445,7 +453,8 @@ if (typeof window !== 'undefined') {
     endpointSamplingTries = sampled.tries;
 
     if (useRoadGraph) {
-      const neighborKeys = roadGraph.adjacency.map((edges) => edges.map((e) => e.to));
+      const neighborKeys =
+        cachedNeighborKeys || roadGraph.adjacency.map((edges) => edges.map((e) => e.to));
       stepper = makeAStarStepper({
         startKey,
         goalKey,
@@ -574,21 +583,10 @@ if (typeof window !== 'undefined') {
   // --- OSM land/water overlay ---
   async function loadLand() {
     try {
-      // Load water/parks GeoJSON and pre-baked coastline mask PNG in parallel.
-      const maskPromise = new Promise((resolve) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = () => {
-          console.warn('Failed to load coastline mask');
-          resolve(null);
-        };
-        img.src = COASTLINE_MASK_URL;
-      });
-
-      const [waterRes, parksRes, maskImg] = await Promise.all([
+      const [waterRes, landPolysRes, parksRes] = await Promise.all([
         fetch(LAND_URL),
+        fetch(LAND_POLYS_URL),
         fetch(PARKS_URL),
-        maskPromise,
       ]);
 
       if (waterRes.ok) {
@@ -596,12 +594,16 @@ if (typeof window !== 'undefined') {
         landPolys = extractLandPolys(geojson);
       }
 
+      if (landPolysRes.ok) {
+        const geojson = await landPolysRes.json();
+        landMassPolys = extractLandMassPolys(geojson);
+      }
+
       if (parksRes.ok) {
         const parks = await parksRes.json();
         parksPolys = extractParksPolys(parks);
       }
 
-      coastlineMaskImg = maskImg;
       landReady = true;
       buildLandLayer(landCtx, landLayer.width, landLayer.height);
     } catch (err) {
@@ -611,49 +613,31 @@ if (typeof window !== 'undefined') {
 
   function buildLandLayer(lctx, w, h) {
     lctx.clearRect(0, 0, w, h);
+    const landProj = makeProjector(simBounds, w, h, CONFIG.rotation);
 
-    // Apply the same rotation as makeProjector uses for polygons.
-    // Land fill covers everything, so we fill first, then rotate for mask + polys.
-    lctx.fillStyle = THEME.landFill;
-    lctx.fillRect(0, 0, w, h);
-
-    // Punch out water using pre-baked coastline mask.
-    // The mask is in non-rotated equirectangular space, so we apply canvas rotation
-    // to match makeProjector's screen-space rotation.
-    if (coastlineMaskImg) {
-      const rb = getRenderBounds(simBounds, w, h);
-      const mw = coastlineMaskImg.width;
-      const mh = coastlineMaskImg.height;
-      // Map renderBounds → mask pixel coordinates.
-      const sx = ((rb.west - MASK_BOUNDS.west) / (MASK_BOUNDS.east - MASK_BOUNDS.west)) * mw;
-      const sy = ((MASK_BOUNDS.north - rb.north) / (MASK_BOUNDS.north - MASK_BOUNDS.south)) * mh;
-      const sw = ((rb.east - rb.west) / (MASK_BOUNDS.east - MASK_BOUNDS.west)) * mw;
-      const sh = ((rb.north - rb.south) / (MASK_BOUNDS.north - MASK_BOUNDS.south)) * mh;
-      // Clamp source rect to mask bounds and compute corresponding dest rect.
-      const csx = Math.max(0, sx);
-      const csy = Math.max(0, sy);
-      const csw = Math.min(sw, mw - csx);
-      const csh = Math.min(sh, mh - csy);
-      const dx = ((csx - sx) / sw) * w;
-      const dy = ((csy - sy) / sh) * h;
-      const dw = (csw / sw) * w;
-      const dh = (csh / sh) * h;
-
+    // Fill land mass polygons (from osmdata pre-processed data).
+    // Canvas starts transparent (dark background = ocean).
+    if (landMassPolys.length) {
       lctx.save();
-      lctx.globalCompositeOperation = 'destination-out';
-      // Rotate around canvas center to match makeProjector's rotation.
-      if (CONFIG.rotation) {
-        lctx.translate(w / 2, h / 2);
-        lctx.rotate((CONFIG.rotation * Math.PI) / 180);
-        lctx.translate(-w / 2, -h / 2);
+      lctx.fillStyle = THEME.landFill;
+      for (const poly of landMassPolys) {
+        for (const ring of poly || []) {
+          if (!ring || ring.length < 3) continue;
+          lctx.beginPath();
+          for (let i = 0; i < ring.length; i++) {
+            const [lon, lat] = ring[i];
+            const p = landProj(lat, lon);
+            if (i === 0) lctx.moveTo(p.x, p.y);
+            else lctx.lineTo(p.x, p.y);
+          }
+          lctx.closePath();
+          lctx.fill();
+        }
       }
-      lctx.drawImage(coastlineMaskImg, csx, csy, csw, csh, dx, dy, dw, dh);
       lctx.restore();
     }
 
-    const landProj = makeProjector(simBounds, w, h, CONFIG.rotation);
-
-    // Water polygons on top.
+    // Water polygons on top (rivers, harbors).
     if (landPolys.length) {
       lctx.save();
       lctx.fillStyle = THEME.waterFill;
@@ -755,6 +739,7 @@ if (typeof window !== 'undefined') {
       // Pre-compute largest connected component so we only sample reachable nodes.
       if (roadGraphReady) {
         reachableNodes = largestComponent(roadGraph);
+        cachedNeighborKeys = roadGraph.adjacency.map((edges) => edges.map((e) => e.to));
       }
 
       // Ensure we have a point cache for snapping/endpoint sampling.
@@ -1110,7 +1095,7 @@ if (typeof window !== 'undefined') {
     if (now - lastHudUpdate > 200) {
       lastHudUpdate = now;
 
-      const openN = currentStep?.openSet?.size ?? 0;
+      const openN = currentStep?.openSize ?? 0;
       const closedN = currentStep?.closedSet?.size ?? 0;
       const steps = currentStep?.steps ?? 0;
 
@@ -1285,4 +1270,55 @@ if (typeof window !== 'undefined') {
   }
 
   requestAnimationFrame(tick);
+
+  // --- Lively Wallpaper integration ---
+  window.livelyPropertyListener = function (name, val) {
+    switch (name) {
+      case 'zoom':
+        CONFIG.zoom = parseFloat(val);
+        resize();
+        break;
+      case 'stepsPerSecond':
+        CONFIG.stepsPerSecond = parseInt(val, 10);
+        CONFIG.stepDelayMs = 1000 / CONFIG.stepsPerSecond;
+        break;
+      case 'maxStepsPerFrame':
+        CONFIG.maxStepsPerFrame = parseInt(val, 10);
+        break;
+      case 'showRoads':
+        showRoads = val === 'true' || val === true;
+        break;
+      case 'showTerrain':
+        showTerrain = val === 'true' || val === true;
+        break;
+      case 'showOpenClosed':
+        CONFIG.showOpenClosed = val === 'true' || val === true ? 1 : 0;
+        break;
+      case 'showCurrent':
+        CONFIG.showCurrent = val === 'true' || val === true ? 1 : 0;
+        break;
+      case 'hud':
+        CONFIG.hud = val === 'true' || val === true ? 1 : 0;
+        if (hud) hud.style.display = CONFIG.hud ? 'block' : 'none';
+        break;
+      case 'rotation':
+        CONFIG.rotation = parseFloat(val);
+        resize();
+        break;
+      case 'roadsDetail':
+        CONFIG.roadsDetail = parseFloat(val);
+        roadsDetail = CONFIG.roadsDetail;
+        if (roadsReady) buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
+        break;
+    }
+  };
+
+  window.livelyPause = function () {
+    // Lively calls this when wallpaper is not visible
+  };
+
+  window.livelyResume = function () {
+    // Lively calls this when wallpaper becomes visible again
+    lastStepAt = performance.now();
+  };
 }

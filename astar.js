@@ -73,11 +73,6 @@ class MinHeap {
     }
   }
 
-  // Return a Set of all keys (for backward-compatible openSet in step results)
-  keys() {
-    return new Set(this._heap.map((e) => e.key));
-  }
-
   _bubbleUp(i) {
     const heap = this._heap;
     const idx = this._index;
@@ -133,11 +128,10 @@ export function makeAStarStepper({
       },
       getState() {
         return {
-          openSet: new Set(),
+          openSize: 0,
           closedSet: new Set(),
           cameFrom: new Map(),
           gScore: new Map(),
-          fScore: new Map(),
           steps: 0,
         };
       },
@@ -149,8 +143,8 @@ export function makeAStarStepper({
   const cameFrom = new Map();
 
   const gScore = new Map([[startKey, 0]]);
-  const fScore = new Map([[startKey, heuristic(startKey, goalKey)]]);
-  openHeap.push(startKey, fScore.get(startKey));
+  const initialF = heuristic(startKey, goalKey);
+  openHeap.push(startKey, initialF);
 
   let done = false;
   let result = null;
@@ -196,12 +190,10 @@ export function makeAStarStepper({
           cameFrom.set(nb, current);
           gScore.set(nb, tentativeG);
           const f = tentativeG + heuristic(nb, goalKey);
-          fScore.set(nb, f);
           // push handles both insert and decreaseKey
           openHeap.push(nb, f);
         } else if (!openHeap.has(nb) && !closedSet.has(nb)) {
           const f = (gScore.get(nb) ?? Infinity) + heuristic(nb, goalKey);
-          fScore.set(nb, f);
           openHeap.push(nb, f);
         }
       }
@@ -210,17 +202,16 @@ export function makeAStarStepper({
         done: false,
         status: 'searching',
         current,
-        openSet: openHeap.keys(),
+        openSize: openHeap.size,
         closedSet,
         cameFrom,
         gScore,
-        fScore,
         steps,
       };
     },
 
     getState() {
-      return { openSet: openHeap.keys(), closedSet, cameFrom, gScore, fScore, steps };
+      return { openSize: openHeap.size, closedSet, cameFrom, gScore, steps };
     },
   };
 }
