@@ -4,18 +4,18 @@ export function stepEndPhase(state, dtMs, config) {
   let done = false;
 
   const nextPhase = () => {
-    if (phase === "end-hold") phase = "end-trace";
-    else if (phase === "end-trace") phase = "end-glow";
+    if (phase === 'end-hold') phase = 'end-trace';
+    else if (phase === 'end-trace') phase = 'end-glow';
     else done = true;
   };
 
   while (!done) {
     const limit =
-      phase === "end-hold"
+      phase === 'end-hold'
         ? config.endHoldMs
-        : phase === "end-trace"
-        ? config.endTraceMs
-        : config.endGlowMs;
+        : phase === 'end-trace'
+          ? config.endTraceMs
+          : config.endGlowMs;
 
     if (limit <= 0) {
       nextPhase();

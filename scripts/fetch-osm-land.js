@@ -1,34 +1,34 @@
 #!/usr/bin/env node
-import fs from "node:fs/promises";
-import path from "node:path";
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 const DEFAULT_BOUNDS = {
   north: 42.55,
-  south: 42.20,
+  south: 42.2,
   west: -71.35,
   east: -70.85,
 };
 
-const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
 
 function parseBoundsFromArgs(args) {
   const out = { ...DEFAULT_BOUNDS };
   for (const arg of args) {
-    const [key, value] = arg.split("=");
+    const [key, value] = arg.split('=');
     if (!value) continue;
     const v = Number.parseFloat(value);
     if (!Number.isFinite(v)) continue;
-    if (key === "--north") out.north = v;
-    if (key === "--south") out.south = v;
-    if (key === "--west") out.west = v;
-    if (key === "--east") out.east = v;
+    if (key === '--north') out.north = v;
+    if (key === '--south') out.south = v;
+    if (key === '--west') out.west = v;
+    if (key === '--east') out.east = v;
   }
   return out;
 }
 
 function parseOutputPathFromArgs(args) {
   for (const arg of args) {
-    if (arg.startsWith("--out=")) return arg.split("=")[1];
+    if (arg.startsWith('--out=')) return arg.split('=')[1];
   }
   return null;
 }
@@ -97,7 +97,9 @@ function isClosedRing(coords) {
 function wayGeomToCoords(el) {
   const geom = el?.geometry;
   if (!Array.isArray(geom) || geom.length < 2) return null;
-  const coords = geom.map((p) => [p.lon, p.lat]).filter((c) => Number.isFinite(c[0]) && Number.isFinite(c[1]));
+  const coords = geom
+    .map((p) => [p.lon, p.lat])
+    .filter((c) => Number.isFinite(c[0]) && Number.isFinite(c[1]));
   return coords.length >= 2 ? coords : null;
 }
 
@@ -123,7 +125,7 @@ function reverseCoords(coords) {
 function stitchRingsFromOuterWays(rel, waysById) {
   const segs = [];
   for (const m of rel.members || []) {
-    if (m.type !== "way" || m.role !== "outer") continue;
+    if (m.type !== 'way' || m.role !== 'outer') continue;
     const way = waysById.get(m.ref);
     const coords = wayGeomToCoords(way);
     if (coords) segs.push(coords);
@@ -186,31 +188,31 @@ function collectWaterPolygons(osm) {
   const elements = osm?.elements || [];
   const waysById = new Map();
   for (const el of elements) {
-    if (el.type === "way") waysById.set(el.id, el);
+    if (el.type === 'way') waysById.set(el.id, el);
   }
 
   const features = [];
 
   // Water as closed ways.
   for (const el of elements) {
-    if (el.type !== "way") continue;
+    if (el.type !== 'way') continue;
     const tags = el.tags || {};
-    const isWater = tags.natural === "water" || tags.waterway === "riverbank";
+    const isWater = tags.natural === 'water' || tags.waterway === 'riverbank';
     if (!isWater) continue;
 
     const ring = wayGeomToRing(el);
     if (!ring) continue;
 
     features.push({
-      type: "Feature",
+      type: 'Feature',
       properties: {
         id: el.id,
-        kind: "water",
+        kind: 'water',
         natural: tags.natural || null,
         waterway: tags.waterway || null,
       },
       geometry: {
-        type: "Polygon",
+        type: 'Polygon',
         coordinates: [ring],
       },
     });
@@ -218,15 +220,16 @@ function collectWaterPolygons(osm) {
 
   // Water as multipolygon relations (use member ways with role=outer).
   for (const el of elements) {
-    if (el.type !== "relation") continue;
+    if (el.type !== 'relation') continue;
     const tags = el.tags || {};
-    const isWater = (tags.type === "multipolygon") && (tags.natural === "water" || tags.waterway === "riverbank");
+    const isWater =
+      tags.type === 'multipolygon' && (tags.natural === 'water' || tags.waterway === 'riverbank');
     if (!isWater) continue;
 
     const outers = [];
     for (const m of el.members || []) {
-      if (m.type !== "way") continue;
-      if (m.role !== "outer") continue;
+      if (m.type !== 'way') continue;
+      if (m.role !== 'outer') continue;
       const way = waysById.get(m.ref);
       const ring = wayGeomToRing(way);
       if (ring) outers.push(ring);
@@ -239,22 +242,22 @@ function collectWaterPolygons(osm) {
     const coordinates = stitched.map((ring) => [ring]);
 
     features.push({
-      type: "Feature",
+      type: 'Feature',
       properties: {
         id: el.id,
-        kind: "water",
+        kind: 'water',
         natural: tags.natural || null,
         waterway: tags.waterway || null,
       },
       geometry: {
-        type: coordinates.length === 1 ? "Polygon" : "MultiPolygon",
+        type: coordinates.length === 1 ? 'Polygon' : 'MultiPolygon',
         coordinates: coordinates.length === 1 ? coordinates[0] : coordinates,
       },
     });
   }
 
   return {
-    type: "FeatureCollection",
+    type: 'FeatureCollection',
     features,
   };
 }
@@ -266,22 +269,22 @@ async function main() {
 
   const query = buildQuery(bounds);
   const res = await fetch(OVERPASS_URL, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
     body: query,
   });
 
   if (!res.ok) throw new Error(`Overpass error: ${res.status} ${res.statusText}`);
 
   const osm = await res.json();
-  if (!osm?.elements) throw new Error("Invalid Overpass response");
+  if (!osm?.elements) throw new Error('Invalid Overpass response');
 
   const fc = collectWaterPolygons(osm);
   fc.bounds = bounds;
-  fc.format = "osm-land-geojson";
+  fc.format = 'osm-land-geojson';
   fc.version = 2;
 
-  const outPath = path.resolve(outOverride || "data/osm/land.geojson");
+  const outPath = path.resolve(outOverride || 'data/osm/land.geojson');
   await fs.mkdir(path.dirname(outPath), { recursive: true });
   await fs.writeFile(outPath, JSON.stringify(fc));
 
