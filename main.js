@@ -355,6 +355,16 @@ if (typeof window !== 'undefined') {
     const useRoadGraph = isRoadGraphActive();
     const useRoadKeys = CONFIG.endpointMode === 'roads' && roadsPointCache.keys.length > 0;
 
+    // Inset sampling bounds by 5% on each edge so endpoints don't spawn at screen borders.
+    const padLat = 0.05 * (simBounds.north - simBounds.south);
+    const padLon = 0.05 * (simBounds.east - simBounds.west);
+    const samplingBounds = {
+      south: simBounds.south + padLat,
+      north: simBounds.north - padLat,
+      west: simBounds.west + padLon,
+      east: simBounds.east - padLon,
+    };
+
     // Exclude upper-left corner box from endpoint sampling (avoids spawning under HUD).
     const excludeNorth = simBounds.south + 0.75 * (simBounds.north - simBounds.south);
     const excludeEast = simBounds.west + 0.5 * (simBounds.east - simBounds.west);
@@ -363,16 +373,16 @@ if (typeof window !== 'undefined') {
       return lat > excludeNorth && lon < excludeEast;
     }
 
-    // Pre-filter graph nodes to simBounds, excluding upper-left corner.
+    // Pre-filter graph nodes to padded bounds, excluding upper-left corner.
     let inBoundsNodeIds = null;
     if (useRoadGraph) {
       inBoundsNodeIds = [];
       for (const node of roadGraph.nodes) {
         if (
-          node.lat >= simBounds.south &&
-          node.lat <= simBounds.north &&
-          node.lon >= simBounds.west &&
-          node.lon <= simBounds.east &&
+          node.lat >= samplingBounds.south &&
+          node.lat <= samplingBounds.north &&
+          node.lon >= samplingBounds.west &&
+          node.lon <= samplingBounds.east &&
           !inExclusionZone(node.lat, node.lon)
         ) {
           inBoundsNodeIds.push(node.id);
