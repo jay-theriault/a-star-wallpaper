@@ -6,6 +6,14 @@ export const BOUNDS = {
   east: -70.85,
 };
 
+// Pre-baked coastline mask covers BOUNDS + 0.2° margin on all sides.
+export const MASK_BOUNDS = {
+  north: BOUNDS.north + 0.2,
+  south: BOUNDS.south - 0.2,
+  west: BOUNDS.west - 0.2,
+  east: BOUNDS.east + 0.2,
+};
+
 export const THEME = {
   // Treat the base background gradient as "ocean" so land tint + water polygons read distinctly.
   bg0: '#050a12',
@@ -54,7 +62,7 @@ export function clamp(v, lo, hi) {
 //   - showCurrent: 0|1 (default 1)
 //   - showPathDuringSearch: 0|1 (default 0)
 //   - showRoads: 0|1 (default 1)
-//   - showTerrain: 0|1 (default 0)
+//   - showTerrain: 0|1 (default 1)
 //   - roadsDetail: int [0,100] (default 70) (UI slider when HUD is enabled)
 //   - seed: string|int (deterministic endpoints)
 //   - centerLat / centerLon: float (override bbox center)
@@ -101,7 +109,7 @@ export const DEFAULT_CONFIG = {
   showCurrent: 1,
   showPathDuringSearch: 0,
   showRoads: 1,
-  showTerrain: 0,
+  showTerrain: 1,
   roadsDetail: 70,
   // Determinism + viewport control
   seed: null,
@@ -125,7 +133,7 @@ export const PRESET_CONFIG = {
     showCurrent: 0,
     showPathDuringSearch: 0,
     showRoads: 1,
-    showTerrain: 0,
+    showTerrain: 1,
     roadsDetail: 70,
   },
   debug: {
@@ -138,7 +146,7 @@ export const PRESET_CONFIG = {
     showCurrent: 1,
     showPathDuringSearch: 1,
     showRoads: 1,
-    showTerrain: 0,
+    showTerrain: 1,
     roadsDetail: 100,
   },
 };

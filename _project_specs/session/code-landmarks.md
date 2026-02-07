@@ -46,6 +46,7 @@ Quick reference to important parts of the codebase.
 | --------------------------------- | ----------------------------------------- |
 | scripts/build-dist.js             | Package for Lively Wallpaper distribution |
 | scripts/build-road-graph-cache.js | Precompute road graph cache               |
+| scripts/build-coastline-mask.js   | Generate pre-baked coastline mask PNG     |
 | scripts/fetch-osm-coastline.js    | Fetch coastline data from OSM             |
 | scripts/fetch-osm-land.js         | Fetch land polygon data from OSM          |
 
@@ -57,7 +58,9 @@ Quick reference to important parts of the codebase.
 
 ## Gotchas & Non-Obvious Behavior
 
-| Location   | Issue        | Notes                                |
-| ---------- | ------------ | ------------------------------------ |
-| index.html | ES modules   | Must serve via HTTP, not file://     |
-| main.js    | Query params | All config is URL query-param driven |
+| Location   | Issue                 | Notes                                                                                            |
+| ---------- | --------------------- | ------------------------------------------------------------------------------------------------ |
+| index.html | ES modules            | Must serve via HTTP, not file://                                                                 |
+| main.js    | Query params          | All config is URL query-param driven                                                             |
+| coastline  | 799 disconnected segs | OSM coastline.geojson has 799 separate LineStrings with gaps up to 300px; greedy chaining needed |
+| mask       | destination-out       | Coastline mask uses white=water, transparent=land; composited with destination-out in Canvas     |
