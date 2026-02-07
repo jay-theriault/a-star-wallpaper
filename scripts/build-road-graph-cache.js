@@ -53,8 +53,11 @@ const raw = await readFile(inputPath, 'utf-8');
 const data = JSON.parse(raw);
 const lines = extractRoadLinesWithMeta(data);
 
+const toleranceMeters = snapMeters ?? 8;
+
 const graph = buildRoadGraphFromLines(lines, {
-  snapToleranceMeters: snapMeters ?? 3,
+  snapToleranceMeters: toleranceMeters,
+  maxNodes: 500000,
   quantizeDegrees,
 });
 
@@ -65,8 +68,8 @@ const payload = {
   version: ROAD_GRAPH_VERSION,
   generatedAt: new Date().toISOString(),
   source: { input: path.relative(repoRoot, inputPath) },
-  options: { toleranceMeters: snapMeters ?? 3 },
-  nodes: graph.nodes,
+  options: { toleranceMeters },
+  nodes: graph.nodes.map((n) => ({ lat: n.lat, lon: n.lon })),
   edges: graph.adjacency.map((list) => {
     return list.map((e) => {
       const tuple = [e.to, e.weight];
