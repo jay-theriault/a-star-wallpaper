@@ -5,6 +5,7 @@ import { extractRoadLinesWithMeta } from './roads-data.js';
 import {
   buildRoadGraph,
   graphNodeLatLon,
+  largestComponent,
   randomGraphNode,
   parseRoadGraphCache,
 } from './road-graph.js';
@@ -81,6 +82,7 @@ if (typeof window !== 'undefined') {
   let roadsPointCache = { points: [], keys: [] };
   let roadGraph = null;
   let roadGraphReady = false;
+  let reachableNodes = null; // Set of node IDs in the largest connected component
   let showRoads = CONFIG.showRoads;
   let showTerrain = CONFIG.showTerrain;
   let roadsDetail = CONFIG.roadsDetail;
@@ -373,7 +375,8 @@ if (typeof window !== 'undefined') {
       return lat > excludeNorth && lon < excludeEast;
     }
 
-    // Pre-filter graph nodes to padded bounds, excluding upper-left corner.
+    // Pre-filter graph nodes to padded bounds, excluding upper-left corner
+    // and nodes not in the largest connected component.
     let inBoundsNodeIds = null;
     if (useRoadGraph) {
       inBoundsNodeIds = [];
@@ -383,7 +386,8 @@ if (typeof window !== 'undefined') {
           node.lat <= samplingBounds.north &&
           node.lon >= samplingBounds.west &&
           node.lon <= samplingBounds.east &&
-          !inExclusionZone(node.lat, node.lon)
+          !inExclusionZone(node.lat, node.lon) &&
+          (!reachableNodes || reachableNodes.has(node.id))
         ) {
           inBoundsNodeIds.push(node.id);
         }
@@ -746,6 +750,11 @@ if (typeof window !== 'undefined') {
           bounds: cacheBounds,
         });
         roadGraphReady = roadGraph.nodes.length > 0;
+      }
+
+      // Pre-compute largest connected component so we only sample reachable nodes.
+      if (roadGraphReady) {
+        reachableNodes = largestComponent(roadGraph);
       }
 
       // Ensure we have a point cache for snapping/endpoint sampling.

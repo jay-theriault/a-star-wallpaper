@@ -348,6 +348,33 @@ export function findNearestGraphNode(graph, lat, lon) {
   return best;
 }
 
+// Returns a Set of node IDs in the largest undirected connected component.
+export function largestComponent(graph) {
+  if (!graph?.nodes?.length) return new Set();
+  const n = graph.nodes.length;
+  const visited = new Uint8Array(n);
+  let bestSet = [];
+
+  for (let start = 0; start < n; start++) {
+    if (visited[start]) continue;
+    const component = [start];
+    visited[start] = 1;
+    let head = 0;
+    while (head < component.length) {
+      const cur = component[head++];
+      for (const e of graph.adjacency[cur] || []) {
+        if (!visited[e.to]) {
+          visited[e.to] = 1;
+          component.push(e.to);
+        }
+      }
+    }
+    if (component.length > bestSet.length) bestSet = component;
+  }
+
+  return new Set(bestSet);
+}
+
 export function parseRoadGraphCache(payload) {
   if (!payload || payload.format !== ROAD_GRAPH_FORMAT) return null;
   if (payload.version !== 1 && payload.version !== 2) return null;
