@@ -8,8 +8,8 @@ import {
   randomGraphNode,
   parseRoadGraphCache,
 } from './road-graph.js';
-import { BOUNDS, THEME, clamp, parseRuntimeConfig } from './config.js';
-import { applyZoom, project, makeProjector } from './coordinates.js';
+import { BOUNDS, MASK_BOUNDS, THEME, clamp, parseRuntimeConfig } from './config.js';
+import { applyZoom, getRenderBounds, project, makeProjector } from './coordinates.js';
 import { ENDPOINT_SAMPLING_MAX_TRIES, sampleEndpointPair } from './endpoint-sampling.js';
 import {
   inBoundsLatLon,
@@ -26,7 +26,7 @@ import {
   buildRoadPointCacheFromGeojson,
   buildRoadPointCacheFromGraph,
 } from './road-point-cache.js';
-import { extractLandPolys, extractCoastlineLines, extractParksPolys } from './terrain-data.js';
+import { extractLandPolys, extractParksPolys } from './terrain-data.js';
 
 const CONFIG = parseRuntimeConfig(typeof window !== 'undefined' ? window.location?.search : '');
 const CENTER_OVERRIDE =
@@ -55,7 +55,7 @@ if (typeof window !== 'undefined') {
   const ROADS_COMPACT_URL = './data/osm/roads.compact.json';
   const ROAD_GRAPH_URL = './data/osm/roadGraph.v1.json';
   const LAND_URL = './data/osm/land.geojson';
-  const COASTLINE_URL = './data/osm/coastline.geojson';
+  const COASTLINE_MASK_URL = './data/osm/coastline-mask.png';
   const PARKS_URL = './data/osm/parks.geojson';
   const roadsLayer = document.createElement('canvas');
   const roadsCtx = roadsLayer.getContext('2d', { alpha: true });
@@ -65,7 +65,7 @@ if (typeof window !== 'undefined') {
   let landPolys = []; // water polys (kind=water)
   let landReady = false;
 
-  let coastlineLines = []; // [[lon,lat]...]
+  let coastlineMaskImg = null; // pre-baked coastline mask PNG
   let parksPolys = []; // polygons (geojson-style coords)
 
   let roadsLines = [];
@@ -509,10 +509,21 @@ if (typeof window !== 'undefined') {
   // --- OSM land/water overlay ---
   async function loadLand() {
     try {
-      const [waterRes, coastRes, parksRes] = await Promise.all([
+      // Load water/parks GeoJSON and pre-baked coastline mask PNG in parallel.
+      const maskPromise = new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => {
+          console.warn('Failed to load coastline mask');
+          resolve(null);
+        };
+        img.src = COASTLINE_MASK_URL;
+      });
+
+      const [waterRes, parksRes, maskImg] = await Promise.all([
         fetch(LAND_URL),
-        fetch(COASTLINE_URL),
         fetch(PARKS_URL),
+        maskPromise,
       ]);
 
       if (waterRes.ok) {
@@ -520,16 +531,12 @@ if (typeof window !== 'undefined') {
         landPolys = extractLandPolys(geojson);
       }
 
-      if (coastRes.ok) {
-        const coast = await coastRes.json();
-        coastlineLines = extractCoastlineLines(coast);
-      }
-
       if (parksRes.ok) {
         const parks = await parksRes.json();
         parksPolys = extractParksPolys(parks);
       }
 
+      coastlineMaskImg = maskImg;
       landReady = true;
       buildLandLayer(landCtx, landLayer.width, landLayer.height);
     } catch (err) {
@@ -537,121 +544,36 @@ if (typeof window !== 'undefined') {
     }
   }
 
-  function buildCoastlineMask(w, h) {
-    // Low-res mask for flood fill.
-    // Increase resolution to avoid narrow channels getting "sealed" by thick lines.
-    const mw = 2048;
-    const mh = Math.round((mw * h) / w);
-    const mask = document.createElement('canvas');
-    mask.width = mw;
-    mask.height = mh;
-    const mctx = mask.getContext('2d');
-
-    // 1) draw coastlines as barrier pixels
-    mctx.clearRect(0, 0, mw, mh);
-    mctx.save();
-    mctx.strokeStyle = 'rgba(0,0,0,1)';
-    mctx.lineWidth = 1;
-    mctx.lineCap = 'round';
-    mctx.lineJoin = 'round';
-
-    const maskProj = makeProjector(simBounds, mw, mh, CONFIG.rotation);
-    for (const line of coastlineLines) {
-      if (!line || line.length < 2) continue;
-      mctx.beginPath();
-      for (let i = 0; i < line.length; i++) {
-        const [lon, lat] = line[i];
-        const p = maskProj(lat, lon);
-        if (i === 0) mctx.moveTo(p.x, p.y);
-        else mctx.lineTo(p.x, p.y);
-      }
-      mctx.stroke();
-    }
-    mctx.restore();
-
-    const img = mctx.getImageData(0, 0, mw, mh);
-    const data = img.data;
-    const barrier = new Uint8Array(mw * mh);
-
-    // Threshold very high so antialiasing doesn't create fat barriers that close harbor mouths.
-    for (let i = 0; i < mw * mh; i++) {
-      const a = data[i * 4 + 3];
-      barrier[i] = a > 245 ? 1 : 0;
-    }
-
-    // 2) flood-fill ocean from the full east edge (robust: doesn't depend on a single seed point).
-    const ocean = new Uint8Array(mw * mh);
-    const qx = new Int32Array(mw * mh);
-    const qy = new Int32Array(mw * mh);
-    let qh = 0;
-    let qt = 0;
-
-    const push = (x, y) => {
-      if (x < 0 || y < 0 || x >= mw || y >= mh) return;
-      const idx = y * mw + x;
-      if (ocean[idx]) return;
-      if (barrier[idx]) return;
-      ocean[idx] = 1;
-      qx[qt] = x;
-      qy[qt] = y;
-      qt++;
-    };
-
-    // Seed a 3px-wide band on the east edge.
-    for (let y = 0; y < mh; y++) {
-      push(mw - 1, y);
-      push(mw - 2, y);
-      push(mw - 3, y);
-    }
-    while (qh < qt) {
-      const x = qx[qh];
-      const y = qy[qh];
-      qh++;
-      push(x + 1, y);
-      push(x - 1, y);
-      push(x, y + 1);
-      push(x, y - 1);
-    }
-
-    return { mw, mh, ocean, barrier };
-  }
-
   function buildLandLayer(lctx, w, h) {
     lctx.clearRect(0, 0, w, h);
 
-    // If we have coastlines, do a coastline-based land mask.
-    if (coastlineLines.length) {
-      const { mw, mh, ocean, barrier } = buildCoastlineMask(w, h);
+    // Default: everything is land.
+    lctx.fillStyle = THEME.landFill;
+    lctx.fillRect(0, 0, w, h);
 
-      // Paint land pixels (complement of ocean) as tint.
-      const img = lctx.createImageData(mw, mh);
-      const d = img.data;
-      for (let i = 0; i < mw * mh; i++) {
-        const isOcean = ocean[i] === 1;
-        const isBarrier = barrier[i] === 1;
-        if (isOcean || isBarrier) {
-          d[i * 4 + 3] = 0;
-          continue;
-        }
-        // land tint
-        d[i * 4 + 0] = 40;
-        d[i * 4 + 1] = 110;
-        d[i * 4 + 2] = 70;
-        d[i * 4 + 3] = Math.round(255 * 0.18);
-      }
+    // Punch out water using pre-baked coastline mask.
+    if (coastlineMaskImg) {
+      const rb = getRenderBounds(simBounds, w, h);
+      const mw = coastlineMaskImg.width;
+      const mh = coastlineMaskImg.height;
+      // Map renderBounds → mask pixel coordinates.
+      const sx = ((rb.west - MASK_BOUNDS.west) / (MASK_BOUNDS.east - MASK_BOUNDS.west)) * mw;
+      const sy = ((MASK_BOUNDS.north - rb.north) / (MASK_BOUNDS.north - MASK_BOUNDS.south)) * mh;
+      const sw = ((rb.east - rb.west) / (MASK_BOUNDS.east - MASK_BOUNDS.west)) * mw;
+      const sh = ((rb.north - rb.south) / (MASK_BOUNDS.north - MASK_BOUNDS.south)) * mh;
+      // Clamp source rect to mask bounds and compute corresponding dest rect.
+      const csx = Math.max(0, sx);
+      const csy = Math.max(0, sy);
+      const csw = Math.min(sw, mw - csx);
+      const csh = Math.min(sh, mh - csy);
+      const dx = ((csx - sx) / sw) * w;
+      const dy = ((csy - sy) / sh) * h;
+      const dw = (csw / sw) * w;
+      const dh = (csh / sh) * h;
 
-      // Draw mask scaled up.
-      const tmp = document.createElement('canvas');
-      tmp.width = mw;
-      tmp.height = mh;
-      const tctx = tmp.getContext('2d');
-      tctx.putImageData(img, 0, 0);
-      lctx.drawImage(tmp, 0, 0, w, h);
-    } else {
-      // Fallback: global tint (previous behavior)
       lctx.save();
-      lctx.fillStyle = THEME.landFill;
-      lctx.fillRect(0, 0, w, h);
+      lctx.globalCompositeOperation = 'destination-out';
+      lctx.drawImage(coastlineMaskImg, csx, csy, csw, csh, dx, dy, dw, dh);
       lctx.restore();
     }
 
