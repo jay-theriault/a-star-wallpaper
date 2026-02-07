@@ -355,7 +355,15 @@ if (typeof window !== 'undefined') {
     const useRoadGraph = isRoadGraphActive();
     const useRoadKeys = CONFIG.endpointMode === 'roads' && roadsPointCache.keys.length > 0;
 
-    // Pre-filter graph nodes to simBounds so endpoints are always visible.
+    // Exclude upper-left corner box from endpoint sampling (avoids spawning under HUD).
+    const excludeNorth = simBounds.south + 0.75 * (simBounds.north - simBounds.south);
+    const excludeEast = simBounds.west + 0.25 * (simBounds.east - simBounds.west);
+
+    function inExclusionZone(lat, lon) {
+      return lat > excludeNorth && lon < excludeEast;
+    }
+
+    // Pre-filter graph nodes to simBounds, excluding upper-left corner.
     let inBoundsNodeIds = null;
     if (useRoadGraph) {
       inBoundsNodeIds = [];
@@ -364,7 +372,8 @@ if (typeof window !== 'undefined') {
           node.lat >= simBounds.south &&
           node.lat <= simBounds.north &&
           node.lon >= simBounds.west &&
-          node.lon <= simBounds.east
+          node.lon <= simBounds.east &&
+          !inExclusionZone(node.lat, node.lon)
         ) {
           inBoundsNodeIds.push(node.id);
         }
