@@ -1,70 +1,70 @@
 #!/usr/bin/env node
-import fs from "node:fs/promises";
-import path from "node:path";
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 const DEFAULT_BOUNDS = {
   north: 42.55,
-  south: 42.20,
+  south: 42.2,
   west: -71.35,
   east: -70.85,
 };
 
-const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
 
 const HIGHWAY_PROFILES = {
-  major: ["motorway", "trunk", "primary", "secondary"],
-  standard: ["motorway", "trunk", "primary", "secondary", "tertiary"],
+  major: ['motorway', 'trunk', 'primary', 'secondary'],
+  standard: ['motorway', 'trunk', 'primary', 'secondary', 'tertiary'],
   full: [
-    "motorway",
-    "trunk",
-    "primary",
-    "secondary",
-    "tertiary",
-    "unclassified",
-    "residential",
-    "living_street",
+    'motorway',
+    'trunk',
+    'primary',
+    'secondary',
+    'tertiary',
+    'unclassified',
+    'residential',
+    'living_street',
   ],
 };
 
 function parseProfileFromArgs(args) {
   for (const arg of args) {
-    if (!arg.startsWith("--profile=")) continue;
-    const value = arg.split("=")[1];
-    if (value === "major" || value === "standard" || value === "full") return value;
+    if (!arg.startsWith('--profile=')) continue;
+    const value = arg.split('=')[1];
+    if (value === 'major' || value === 'standard' || value === 'full') return value;
   }
-  return "standard";
+  return 'standard';
 }
 
 function parseBoundsFromArgs(args) {
   // --north= --south= --west= --east=
   const out = { ...DEFAULT_BOUNDS };
   for (const arg of args) {
-    const [key, value] = arg.split("=");
+    const [key, value] = arg.split('=');
     if (!value) continue;
     const v = Number.parseFloat(value);
     if (!Number.isFinite(v)) continue;
-    if (key === "--north") out.north = v;
-    if (key === "--south") out.south = v;
-    if (key === "--west") out.west = v;
-    if (key === "--east") out.east = v;
+    if (key === '--north') out.north = v;
+    if (key === '--south') out.south = v;
+    if (key === '--west') out.west = v;
+    if (key === '--east') out.east = v;
   }
   return out;
 }
 
 function parseFormatFromArgs(args) {
   for (const arg of args) {
-    if (arg.startsWith("--format=")) {
-      const value = arg.split("=")[1];
-      if (value === "geojson" || value === "compact") return value;
+    if (arg.startsWith('--format=')) {
+      const value = arg.split('=')[1];
+      if (value === 'geojson' || value === 'compact') return value;
     }
-    if (arg === "--compact") return "compact";
+    if (arg === '--compact') return 'compact';
   }
-  return "geojson";
+  return 'geojson';
 }
 
 function parseOutputPathFromArgs(args) {
   for (const arg of args) {
-    if (arg.startsWith("--out=")) return arg.split("=")[1];
+    if (arg.startsWith('--out=')) return arg.split('=')[1];
   }
   return null;
 }
@@ -72,7 +72,7 @@ function parseOutputPathFromArgs(args) {
 function buildQuery(bounds, profile) {
   const { south, west, north, east } = bounds;
   const allowed = HIGHWAY_PROFILES[profile] || HIGHWAY_PROFILES.standard;
-  const regex = allowed.join("|");
+  const regex = allowed.join('|');
   return `[
     out:json][timeout:60];
     (
@@ -105,12 +105,12 @@ function collectLines(osm, profile) {
 
   const nodes = new Map();
   for (const el of osm.elements) {
-    if (el.type === "node") nodes.set(el.id, [el.lon, el.lat]);
+    if (el.type === 'node') nodes.set(el.id, [el.lon, el.lat]);
   }
 
   const lines = [];
   for (const el of osm.elements) {
-    if (el.type !== "way") continue;
+    if (el.type !== 'way') continue;
     const highway = el.tags?.highway;
     if (!highway || !allowed.has(highway)) continue;
 
@@ -124,7 +124,8 @@ function collectLines(osm, profile) {
     const simplified = simplifyLine(coords);
     if (simplified.length < 2) continue;
 
-    lines.push({ id: el.id, highway, coords: simplified });
+    const oneway = el.tags?.oneway ?? null;
+    lines.push({ id: el.id, highway, oneway, coords: simplified });
   }
 
   return lines;
@@ -132,15 +133,16 @@ function collectLines(osm, profile) {
 
 function toFeatureCollection(lines) {
   return {
-    type: "FeatureCollection",
+    type: 'FeatureCollection',
     features: lines.map((line) => ({
-      type: "Feature",
+      type: 'Feature',
       properties: {
         id: line.id,
         highway: line.highway,
+        oneway: line.oneway ?? null,
       },
       geometry: {
-        type: "LineString",
+        type: 'LineString',
         coordinates: line.coords,
       },
     })),
@@ -149,10 +151,14 @@ function toFeatureCollection(lines) {
 
 function toCompactFormat(lines, bounds) {
   return {
-    format: "osm-roads-compact",
+    format: 'osm-roads-compact',
     version: 2,
     bounds,
-    lines: lines.map((line) => ({ h: line.highway, c: line.coords.flat() })),
+    lines: lines.map((line) => {
+      const entry = { h: line.highway, c: line.coords.flat() };
+      if (line.oneway != null) entry.o = line.oneway;
+      return entry;
+    }),
   };
 }
 
@@ -165,9 +171,9 @@ async function main() {
   const query = buildQuery(bounds, profile);
 
   const res = await fetch(OVERPASS_URL, {
-    method: "POST",
+    method: 'POST',
     headers: {
-      "Content-Type": "text/plain;charset=UTF-8",
+      'Content-Type': 'text/plain;charset=UTF-8',
     },
     body: query,
   });
@@ -177,15 +183,16 @@ async function main() {
   }
 
   const osm = await res.json();
-  if (!osm?.elements) throw new Error("Invalid Overpass response");
+  if (!osm?.elements) throw new Error('Invalid Overpass response');
 
   const lines = collectLines(osm, profile);
   const outPath = path.resolve(
-    outOverride || (format === "compact" ? "data/osm/roads.compact.json" : "data/osm/roads.geojson"),
+    outOverride ||
+      (format === 'compact' ? 'data/osm/roads.compact.json' : 'data/osm/roads.geojson'),
   );
   await fs.mkdir(path.dirname(outPath), { recursive: true });
 
-  if (format === "compact") {
+  if (format === 'compact') {
     const compact = toCompactFormat(lines, bounds);
     await fs.writeFile(outPath, JSON.stringify(compact));
     console.log(`Wrote ${compact.lines.length} road lines to ${outPath} (profile=${profile})`);

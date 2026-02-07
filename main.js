@@ -53,7 +53,7 @@ if (typeof window !== 'undefined') {
 
   const ROADS_GEO_URL = './data/osm/roads.geojson';
   const ROADS_COMPACT_URL = './data/osm/roads.compact.json';
-  const ROAD_GRAPH_URL = './data/osm/roadGraph.v1.json';
+  const ROAD_GRAPH_URL = './data/osm/roadGraph.v2.json';
   const LAND_URL = './data/osm/land.geojson';
   const COASTLINE_MASK_URL = './data/osm/coastline-mask.png';
   const PARKS_URL = './data/osm/parks.geojson';
@@ -294,7 +294,16 @@ if (typeof window !== 'undefined') {
   function pathLengthMeters(pathKeys, bounds) {
     if (!pathKeys || pathKeys.length < 2) return 0;
     let total = 0;
+    const useGraph = isRoadGraphActive();
     for (let i = 1; i < pathKeys.length; i++) {
+      // Prefer edge weights from costMaps (accurate for contracted edges).
+      if (useGraph) {
+        const w = roadGraph.costMaps[pathKeys[i - 1]]?.get(pathKeys[i]);
+        if (Number.isFinite(w)) {
+          total += w;
+          continue;
+        }
+      }
       const a = keyToLatLon(pathKeys[i - 1], bounds);
       const b = keyToLatLon(pathKeys[i], bounds);
       if (!a || !b) continue;
@@ -346,7 +355,45 @@ if (typeof window !== 'undefined') {
     const useRoadGraph = isRoadGraphActive();
     const useRoadKeys = CONFIG.endpointMode === 'roads' && roadsPointCache.keys.length > 0;
 
+    // Inset sampling bounds by 5% on each edge so endpoints don't spawn at screen borders.
+    const padLat = 0.05 * (simBounds.north - simBounds.south);
+    const padLon = 0.05 * (simBounds.east - simBounds.west);
+    const samplingBounds = {
+      south: simBounds.south + padLat,
+      north: simBounds.north - padLat,
+      west: simBounds.west + padLon,
+      east: simBounds.east - padLon,
+    };
+
+    // Exclude upper-left corner box from endpoint sampling (avoids spawning under HUD).
+    const excludeNorth = simBounds.south + 0.75 * (simBounds.north - simBounds.south);
+    const excludeEast = simBounds.west + 0.5 * (simBounds.east - simBounds.west);
+
+    function inExclusionZone(lat, lon) {
+      return lat > excludeNorth && lon < excludeEast;
+    }
+
+    // Pre-filter graph nodes to padded bounds, excluding upper-left corner.
+    let inBoundsNodeIds = null;
+    if (useRoadGraph) {
+      inBoundsNodeIds = [];
+      for (const node of roadGraph.nodes) {
+        if (
+          node.lat >= samplingBounds.south &&
+          node.lat <= samplingBounds.north &&
+          node.lon >= samplingBounds.west &&
+          node.lon <= samplingBounds.east &&
+          !inExclusionZone(node.lat, node.lon)
+        ) {
+          inBoundsNodeIds.push(node.id);
+        }
+      }
+    }
+
     const randomKey = (rng) => {
+      if (useRoadGraph && inBoundsNodeIds.length > 0) {
+        return inBoundsNodeIds[Math.floor(rng() * inBoundsNodeIds.length)];
+      }
       if (useRoadGraph) return randomGraphNode(roadGraph, rng);
       if (useRoadKeys) return randomRoadKey(rng);
 
@@ -683,9 +730,9 @@ if (typeof window !== 'undefined') {
       // Always build the roads layer from lines.
       buildRoadsLayer(roadsCtx, roadsLayer.width, roadsLayer.height);
 
-      // If we didn't get a cached road graph, build one from the lines.
+      // If we didn't get a cached road graph, build one from the lines (with oneway metadata).
       if (!roadGraphReady) {
-        roadGraph = buildRoadGraph(roadsLines, {
+        roadGraph = buildRoadGraph(roadsLinesMeta, {
           toleranceMeters: 8,
           bounds: cacheBounds,
         });
@@ -843,13 +890,38 @@ if (typeof window !== 'undefined') {
     exploredCtx.restore();
   }
 
+  function getViaGeometry(fromId, toId) {
+    if (!isRoadGraphActive()) return null;
+    const edges = roadGraph.adjacency[fromId];
+    if (!edges) return null;
+    for (const e of edges) {
+      if (e.to === toId && e.via) return e.via;
+    }
+    return null;
+  }
+
   function strokePath(keys, w, h, count) {
     const n = Math.min(keys.length, Math.max(2, count));
+    const useVia = isRoadGraphActive();
+    const proj = useVia ? makeProjector(simBounds, w, h, CONFIG.rotation) : null;
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
       const p = cellToXY(keys[i], w, h);
-      if (i === 0) ctx.moveTo(p.x, p.y);
-      else ctx.lineTo(p.x, p.y);
+      if (i === 0) {
+        ctx.moveTo(p.x, p.y);
+      } else {
+        // Draw via geometry for contracted edges.
+        if (useVia) {
+          const via = getViaGeometry(keys[i - 1], keys[i]);
+          if (via) {
+            for (const [lon, lat] of via) {
+              const vp = proj(lat, lon);
+              ctx.lineTo(vp.x, vp.y);
+            }
+          }
+        }
+        ctx.lineTo(p.x, p.y);
+      }
     }
   }
 
@@ -917,28 +989,25 @@ if (typeof window !== 'undefined') {
     ctx.restore();
   }
 
-  function drawCurrent(k, w, h, now) {
+  function drawCurrent(k, w, h) {
     if (!k) return;
     const p = cellToXY(k, w, h);
-    const t = (now % 900) / 900;
-    const pulse = 0.5 - 0.5 * Math.cos(t * Math.PI * 2);
-
     ctx.save();
     ctx.globalCompositeOperation = 'source-over';
 
     // Ring.
-    ctx.globalAlpha = 0.45 + 0.35 * pulse;
+    ctx.globalAlpha = 0.7;
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 7 + 3 * pulse, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
     ctx.stroke();
 
     // Core dot.
     ctx.globalAlpha = 0.95;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
@@ -990,7 +1059,7 @@ if (typeof window !== 'undefined') {
       }
 
       if (CONFIG.showCurrent !== 0) {
-        drawCurrent(currentStep.current, w, h, now);
+        drawCurrent(currentStep.current, w, h);
       }
     }
 

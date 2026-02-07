@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-import { readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { extractRoadLines } from "../roads-data.js";
-import { buildRoadGraphFromLines, ROAD_GRAPH_FORMAT, ROAD_GRAPH_VERSION } from "../road-graph.js";
+import { extractRoadLinesWithMeta } from '../roads-data.js';
+import { buildRoadGraphFromLines, ROAD_GRAPH_FORMAT, ROAD_GRAPH_VERSION } from '../road-graph.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(here, "..");
+const repoRoot = path.resolve(here, '..');
 
 function readArg(name) {
   const prefix = `--${name}=`;
@@ -26,14 +26,14 @@ function parseNumber(raw) {
   return Number.isFinite(n) ? n : null;
 }
 
-const inputArg = readArg("input");
-const outputArg = readArg("output");
-const snapMeters = parseNumber(readArg("snapMeters"));
-const quantizeDegrees = parseNumber(readArg("quantizeDegrees"));
+const inputArg = readArg('input');
+const outputArg = readArg('output');
+const snapMeters = parseNumber(readArg('snapMeters'));
+const quantizeDegrees = parseNumber(readArg('quantizeDegrees'));
 
-const defaultCompact = path.resolve(repoRoot, "data/osm/roads.compact.json");
-const defaultGeo = path.resolve(repoRoot, "data/osm/roads.geojson");
-const defaultOut = path.resolve(repoRoot, "data/osm/roadGraph.v1.json");
+const defaultCompact = path.resolve(repoRoot, 'data/osm/roads.compact.json');
+const defaultGeo = path.resolve(repoRoot, 'data/osm/roads.geojson');
+const defaultOut = path.resolve(repoRoot, 'data/osm/roadGraph.v2.json');
 
 const inputPath = inputArg
   ? path.resolve(repoRoot, inputArg)
@@ -42,36 +42,49 @@ const inputPath = inputArg
     : defaultGeo;
 const outputPath = outputArg ? path.resolve(repoRoot, outputArg) : defaultOut;
 
-if (readFlag("help")) {
-  console.log(`Usage: node scripts/build-road-graph-cache.js [--input=PATH] [--output=PATH] [--snapMeters=3] [--quantizeDegrees=0.00005]`);
+if (readFlag('help')) {
+  console.log(
+    `Usage: node scripts/build-road-graph-cache.js [--input=PATH] [--output=PATH] [--snapMeters=3] [--quantizeDegrees=0.00005]`,
+  );
   process.exit(0);
 }
 
-const raw = await readFile(inputPath, "utf-8");
+const raw = await readFile(inputPath, 'utf-8');
 const data = JSON.parse(raw);
-const lines = extractRoadLines(data);
+const lines = extractRoadLinesWithMeta(data);
+
+const toleranceMeters = snapMeters ?? 8;
 
 const graph = buildRoadGraphFromLines(lines, {
-  snapToleranceMeters: snapMeters ?? 3,
+  snapToleranceMeters: toleranceMeters,
+  maxNodes: 500000,
   quantizeDegrees,
 });
+
+console.log(`Graph: ${graph.nodes.length} nodes, ${graph.edges} directed edges`);
 
 const payload = {
   format: ROAD_GRAPH_FORMAT,
   version: ROAD_GRAPH_VERSION,
   generatedAt: new Date().toISOString(),
   source: { input: path.relative(repoRoot, inputPath) },
-  options: graph.options,
-  nodes: graph.nodes,
-  edges: graph.edges,
+  options: { toleranceMeters },
+  nodes: graph.nodes.map((n) => ({ lat: n.lat, lon: n.lon })),
+  edges: graph.adjacency.map((list) => {
+    return list.map((e) => {
+      const tuple = [e.to, e.weight];
+      if (e.via) tuple.push(e.via);
+      return tuple;
+    });
+  }),
 };
 
-await writeFile(outputPath, `${JSON.stringify(payload)}\n`, "utf-8");
+await writeFile(outputPath, `${JSON.stringify(payload)}\n`, 'utf-8');
 console.log(`Wrote road graph cache: ${path.relative(repoRoot, outputPath)}`);
 
 async function exists(p) {
   try {
-    await readFile(p, "utf-8");
+    await readFile(p, 'utf-8');
     return true;
   } catch {
     return false;
