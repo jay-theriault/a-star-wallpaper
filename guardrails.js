@@ -12,12 +12,12 @@ export function updateGuardrails(state, event, limits = DEFAULT_GUARDRAILS) {
     relaxCyclesRemaining: state?.relaxCyclesRemaining ?? 0,
   };
 
-  if (event === "success") {
+  if (event === 'success') {
     next.consecutiveFailures = 0;
     next.consecutiveResamples = 0;
-  } else if (event === "failure") {
+  } else if (event === 'failure') {
     next.consecutiveFailures += 1;
-  } else if (event === "resample") {
+  } else if (event === 'resample') {
     next.consecutiveResamples += 1;
   }
 
