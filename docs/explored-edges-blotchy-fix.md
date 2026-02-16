@@ -12,7 +12,7 @@ Two issues combined to produce the blotchy appearance:
 
 ### 1. Stride sampling dropped most edges (primary cause)
 
-`renderExploredEdgesToLayer()` cleared and redrew the entire offscreen canvas every frame, capped at `MAX_RENDER_NODES_PER_SET` (3500) via stride sampling. On large searches with 10,000+ explored nodes, this silently dropped 60-70% of edges. Since the Set iterates in insertion order (temporal, not spatial), the dropped edges created random spatial holes across the explored area.
+`renderExploredEdgesToLayer()` cleared and redrew the entire offscreen canvas every frame, capped at 3500 nodes via stride sampling. On large searches with 10,000+ explored nodes, this silently dropped 60-70% of edges. Since the Set iterates in insertion order (temporal, not spatial), the dropped edges created random spatial holes across the explored area.
 
 ### 2. Missing via geometry for contracted edges
 
@@ -34,7 +34,7 @@ Since intersections can be far apart, each edge appeared as a short straight das
 
 Instead of clearing and redrawing all edges every frame, the offscreen canvas now persists and only new edges are appended each frame. This removes the stride sampling entirely — every explored edge is drawn, with minimal per-frame cost since only a handful of new edges are added each step.
 
-Key change: a `exploredDrawnCount` counter tracks how many closedSet entries have been rendered. Each frame skips already-drawn entries and only draws new ones. The counter resets on simulation reset and viewport resize.
+Key change: an `exploredDrawnCount` counter tracks how many closedSet entries have been rendered. Each frame skips already-drawn entries and only draws new ones. The counter resets on simulation reset and viewport resize.
 
 ### Via geometry (commit 4106490) — edges follow road curves
 
