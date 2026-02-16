@@ -896,6 +896,9 @@ if (typeof window !== 'undefined') {
     let idx = 0;
     let drawn = 0;
 
+    const useVia = isRoadGraphActive();
+    const proj = useVia ? makeProjector(simBounds, w, h, CONFIG.rotation) : null;
+
     exploredCtx.beginPath();
     for (const k of step.closedSet) {
       if (stride > 1 && idx % stride !== 0) {
@@ -909,9 +912,21 @@ if (typeof window !== 'undefined') {
       const pred = step.cameFrom.get(k);
       if (pred == null) continue;
 
-      const p1 = cellToXY(k, w, h);
-      const p2 = cellToXY(pred, w, h);
+      const p1 = cellToXY(pred, w, h);
       exploredCtx.moveTo(p1.x, p1.y);
+
+      // Draw via geometry for contracted road graph edges.
+      if (useVia) {
+        const via = getViaGeometry(pred, k);
+        if (via) {
+          for (const [lon, lat] of via) {
+            const vp = proj(lat, lon);
+            exploredCtx.lineTo(vp.x, vp.y);
+          }
+        }
+      }
+
+      const p2 = cellToXY(k, w, h);
       exploredCtx.lineTo(p2.x, p2.y);
     }
     exploredCtx.stroke();
