@@ -46,16 +46,19 @@ const MAX_CANVAS_PIXELS = 16_777_216; // 16M pixels — safe for all browsers
 
 // --- Canvas setup ---
 if (typeof window !== 'undefined') {
-  const canvas = document.getElementById('c');
+  // Three CSS-stacked DOM canvases — only the dynamic layer redraws per frame.
+  // bg: static (gradient+terrain+roads+noise), drawn on resize/load/toggle only.
+  // explored: A* explored edges, append-only, cleared between cycles.
+  // dynamic: moving elements (current node, path, markers), cleared each frame.
+  const bgCanvas = document.getElementById('c-bg');
+  const exploredCanvas = document.getElementById('c-explored');
+  const dynCanvas = document.getElementById('c-dynamic');
   const hud = document.getElementById('hud');
   const help = document.getElementById('help');
   const controls = document.getElementById('controls');
-  const screenCtx = canvas.getContext('2d', { alpha: false });
-
-  // Double-buffer: render to offscreen frame, then blit to visible canvas
-  // in a single drawImage to prevent flicker under compositors (Lively/DWM).
-  const frame = document.createElement('canvas');
-  const ctx = frame.getContext('2d', { alpha: false });
+  const bgCtx = bgCanvas.getContext('2d', { alpha: false });
+  const exploredCtx = exploredCanvas.getContext('2d', { alpha: true });
+  const ctx = dynCanvas.getContext('2d', { alpha: true });
 
   const ROADS_GEO_URL = './data/osm/roads.geojson';
   const ROADS_COMPACT_URL = './data/osm/roads.compact.json';
@@ -66,8 +69,6 @@ if (typeof window !== 'undefined') {
   let landPolys = []; // water polys (kind=water)
   let landReady = false;
 
-  const exploredLayer = document.createElement('canvas');
-  const exploredCtx = exploredLayer.getContext('2d', { alpha: true });
   let exploredLayerStep = -1;
   let exploredDrawnCount = 0;
 
@@ -106,9 +107,17 @@ if (typeof window !== 'undefined') {
   function rebuildStaticBg() {
     const w = Math.max(1, Math.floor(window.innerWidth));
     const h = Math.max(1, Math.floor(window.innerHeight));
-    buildBackground(staticCtx, w, h);
-    if (showTerrain && landReady) buildLandLayer(staticCtx, w, h);
-    if (showRoads && roadsReady) buildRoadsLayer(staticCtx, w, h);
+    buildBackground(bgCtx, w, h);
+    if (showTerrain && landReady) buildLandLayer(bgCtx, w, h);
+    if (showRoads && roadsReady) buildRoadsLayer(bgCtx, w, h);
+    if (noisePattern) {
+      bgCtx.save();
+      bgCtx.globalAlpha = CONFIG.noiseAlpha;
+      bgCtx.globalCompositeOperation = 'overlay';
+      bgCtx.fillStyle = noisePattern;
+      bgCtx.fillRect(0, 0, w, h);
+      bgCtx.restore();
+    }
   }
 
   function initControls() {
@@ -151,9 +160,6 @@ if (typeof window !== 'undefined') {
 
   initControls();
 
-  // Static background: gradient + terrain + roads merged into one canvas.
-  const staticBg = document.createElement('canvas');
-  const staticCtx = staticBg.getContext('2d', { alpha: false });
   const noise = document.createElement('canvas');
   const noiseCtx = noise.getContext('2d');
 
@@ -167,33 +173,24 @@ if (typeof window !== 'undefined') {
       dpr = Math.max(1, Math.sqrt(MAX_CANVAS_PIXELS / (cssW * cssH)));
     }
 
-    canvas.width = Math.floor(cssW * dpr);
-    canvas.height = Math.floor(cssH * dpr);
-    canvas.style.width = cssW + 'px';
-    canvas.style.height = cssH + 'px';
-    screenCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    frame.width = Math.floor(cssW * dpr);
-    frame.height = Math.floor(cssH * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
     const physW = Math.max(1, Math.floor(cssW * dpr));
     const physH = Math.max(1, Math.floor(cssH * dpr));
 
-    // Resize offscreen layers to device-pixel resolution.
-    // Setting .width/.height resets the context transform, so we
-    // re-apply scale(dpr) after each so draw calls stay in CSS pixels.
-    staticBg.width = physW;
-    staticBg.height = physH;
-    staticCtx.scale(dpr, dpr);
-    rebuildStaticBg();
+    // Size all 3 DOM canvases to device-pixel resolution.
+    for (const c of [bgCanvas, exploredCanvas, dynCanvas]) {
+      c.width = physW;
+      c.height = physH;
+      c.style.width = cssW + 'px';
+      c.style.height = cssH + 'px';
+    }
+    bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    exploredCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     buildNoise(noiseCtx);
-    noisePattern = ctx.createPattern(noise, 'repeat');
+    noisePattern = bgCtx.createPattern(noise, 'repeat');
+    rebuildStaticBg();
 
-    exploredLayer.width = physW;
-    exploredLayer.height = physH;
-    exploredCtx.scale(dpr, dpr);
     exploredLayerStep = -1;
     exploredDrawnCount = 0;
   }
@@ -365,7 +362,6 @@ if (typeof window !== 'undefined') {
   let stepper = null;
   let currentStep = null;
   let finalPath = null;
-  let lastSearchStep = null; // preserved closedSet + cameFrom for end-phase gold edges
   let phase = 'search'; // search | end-hold | end-trace | end-glow
   let phaseT = 0;
   let lastStepAt = 0;
@@ -507,7 +503,6 @@ if (typeof window !== 'undefined') {
 
     currentStep = null;
     finalPath = null;
-    lastSearchStep = null;
     exploredCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     exploredLayerStep = -1;
     exploredDrawnCount = 0;
@@ -1052,21 +1047,10 @@ if (typeof window !== 'undefined') {
     const w = window.innerWidth;
     const h = window.innerHeight;
 
-    // Static background (gradient + terrain + roads pre-composited).
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 1;
-    ctx.drawImage(staticBg, 0, 0, w, h);
+    // Clear the dynamic layer (transparent — almost free).
+    ctx.clearRect(0, 0, w, h);
 
-    // Film grain.
-    if (noisePattern) {
-      ctx.save();
-      ctx.globalAlpha = CONFIG.noiseAlpha;
-      ctx.globalCompositeOperation = 'overlay';
-      ctx.fillStyle = noisePattern;
-      ctx.fillRect(0, 0, w, h);
-      ctx.restore();
-    }
-
+    // Explored edges: append new ones to the explored DOM canvas.
     if (currentStep && currentStep.status === 'searching') {
       if (CONFIG.showOpenClosed !== 0) {
         const stepCount = currentStep.steps ?? 0;
@@ -1074,7 +1058,6 @@ if (typeof window !== 'undefined') {
           renderExploredEdgesToLayer(currentStep, w, h);
           exploredLayerStep = stepCount;
         }
-        ctx.drawImage(exploredLayer, 0, 0, w, h);
       }
 
       if (CONFIG.showPathDuringSearch !== 0) {
@@ -1090,12 +1073,7 @@ if (typeof window !== 'undefined') {
       }
     }
 
-    // Draw explored edges (gold) during end phases from saved search state.
-    // exploredLayer persists from final search step — just composite it.
-    if (lastSearchStep && (phase === 'end-hold' || phase === 'end-trace' || phase === 'end-glow')) {
-      ctx.drawImage(exploredLayer, 0, 0, w, h);
-    }
-
+    // End phases: explored edges persist on their own DOM canvas automatically.
     if (finalPath) {
       if (phase === 'end-hold') {
         drawPath(finalPath, w, h, 1.0);
@@ -1215,10 +1193,6 @@ if (typeof window !== 'undefined') {
       }
     } // end HUD throttle
 
-    // Blit completed frame to visible canvas in one
-    // operation to prevent flicker under compositors.
-    screenCtx.drawImage(frame, 0, 0, w, h);
-
     requestAnimationFrame(tick);
   }
 
@@ -1261,11 +1235,6 @@ if (typeof window !== 'undefined') {
 
             finalPath = r.path;
             lastPathLengthMeters = pathLengthMeters(r.path, simBounds);
-            // Preserve explored edges for rendering during end phases.
-            lastSearchStep = {
-              closedSet: new Set(r.closedSet),
-              cameFrom: new Map(r.cameFrom),
-            };
             phase = 'end-hold';
             phaseT = 0;
           } else {
