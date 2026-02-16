@@ -50,7 +50,12 @@ if (typeof window !== 'undefined') {
   const hud = document.getElementById('hud');
   const help = document.getElementById('help');
   const controls = document.getElementById('controls');
-  const ctx = canvas.getContext('2d', { alpha: false });
+  const screenCtx = canvas.getContext('2d', { alpha: false });
+
+  // Double-buffer: render to offscreen frame, then blit to visible canvas
+  // in a single drawImage to prevent flicker under compositors (Lively/DWM).
+  const frame = document.createElement('canvas');
+  const ctx = frame.getContext('2d', { alpha: false });
 
   const ROADS_GEO_URL = './data/osm/roads.geojson';
   const ROADS_COMPACT_URL = './data/osm/roads.compact.json';
@@ -58,11 +63,6 @@ if (typeof window !== 'undefined') {
   const LAND_URL = './data/osm/land.geojson';
   const LAND_POLYS_URL = './data/osm/land-polygons.geojson';
   const PARKS_URL = './data/osm/parks.geojson';
-  const roadsLayer = document.createElement('canvas');
-  const roadsCtx = roadsLayer.getContext('2d', { alpha: true });
-
-  const landLayer = document.createElement('canvas');
-  const landCtx = landLayer.getContext('2d', { alpha: true });
   let landPolys = []; // water polys (kind=water)
   let landReady = false;
 
@@ -103,9 +103,12 @@ if (typeof window !== 'undefined') {
     controls.style.display = 'none';
   }
 
-  function rebuildRoadsLayerSoon() {
-    if (!roadsReady) return;
-    buildRoadsLayer(roadsCtx, window.innerWidth, window.innerHeight);
+  function rebuildStaticBg() {
+    const w = Math.max(1, Math.floor(window.innerWidth));
+    const h = Math.max(1, Math.floor(window.innerHeight));
+    buildBackground(staticCtx, w, h);
+    if (showTerrain && landReady) buildLandLayer(staticCtx, w, h);
+    if (showRoads && roadsReady) buildRoadsLayer(staticCtx, w, h);
   }
 
   function initControls() {
@@ -127,6 +130,7 @@ if (typeof window !== 'undefined') {
     if (terrain) {
       terrain.addEventListener('change', () => {
         showTerrain = terrain.checked ? 1 : 0;
+        rebuildStaticBg();
         requestAnimationFrame(render);
       });
     }
@@ -139,7 +143,7 @@ if (typeof window !== 'undefined') {
         if (!Number.isFinite(v)) return;
         roadsDetail = clamp(v, 0, 100);
         if (label) label.textContent = String(roadsDetail);
-        rebuildRoadsLayerSoon();
+        rebuildStaticBg();
         requestAnimationFrame(render);
       });
     }
@@ -147,9 +151,9 @@ if (typeof window !== 'undefined') {
 
   initControls();
 
-  // Background layers cached into offscreen canvases (rebuilt on resize).
-  const bg = document.createElement('canvas');
-  const bgCtx = bg.getContext('2d', { alpha: false });
+  // Static background: gradient + terrain + roads merged into one canvas.
+  const staticBg = document.createElement('canvas');
+  const staticCtx = staticBg.getContext('2d', { alpha: false });
   const noise = document.createElement('canvas');
   const noiseCtx = noise.getContext('2d');
 
@@ -167,33 +171,25 @@ if (typeof window !== 'undefined') {
     canvas.height = Math.floor(cssH * dpr);
     canvas.style.width = cssW + 'px';
     canvas.style.height = cssH + 'px';
+    screenCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    frame.width = Math.floor(cssW * dpr);
+    frame.height = Math.floor(cssH * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const w = Math.max(1, Math.floor(cssW));
-    const h = Math.max(1, Math.floor(cssH));
     const physW = Math.max(1, Math.floor(cssW * dpr));
     const physH = Math.max(1, Math.floor(cssH * dpr));
 
-    // Resize all offscreen layers to device-pixel resolution.
+    // Resize offscreen layers to device-pixel resolution.
     // Setting .width/.height resets the context transform, so we
     // re-apply scale(dpr) after each so draw calls stay in CSS pixels.
-    bg.width = physW;
-    bg.height = physH;
-    bgCtx.scale(dpr, dpr);
-    buildBackground(bgCtx, w, h);
+    staticBg.width = physW;
+    staticBg.height = physH;
+    staticCtx.scale(dpr, dpr);
+    rebuildStaticBg();
 
     buildNoise(noiseCtx);
     noisePattern = ctx.createPattern(noise, 'repeat');
-
-    roadsLayer.width = physW;
-    roadsLayer.height = physH;
-    roadsCtx.scale(dpr, dpr);
-    if (roadsReady) buildRoadsLayer(roadsCtx, w, h);
-
-    landLayer.width = physW;
-    landLayer.height = physH;
-    landCtx.scale(dpr, dpr);
-    if (landReady) buildLandLayer(landCtx, w, h);
 
     exploredLayer.width = physW;
     exploredLayer.height = physH;
@@ -225,6 +221,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('keydown', (e) => {
     if (e.key?.toLowerCase() === 'r') {
       showRoads = showRoads ? 0 : 1;
+      rebuildStaticBg();
     }
 
     if (e.key?.toLowerCase() === 't') {
@@ -233,6 +230,7 @@ if (typeof window !== 'undefined') {
         const box = controls.querySelector('#showTerrain');
         if (box) box.checked = !!showTerrain;
       }
+      rebuildStaticBg();
       requestAnimationFrame(render);
     }
 
@@ -633,14 +631,13 @@ if (typeof window !== 'undefined') {
       }
 
       landReady = true;
-      buildLandLayer(landCtx, window.innerWidth, window.innerHeight);
+      rebuildStaticBg();
     } catch (err) {
       console.warn('Failed to load land overlay', err);
     }
   }
 
   function buildLandLayer(lctx, w, h) {
-    lctx.clearRect(0, 0, w, h);
     const landProj = makeProjector(simBounds, w, h, CONFIG.rotation);
 
     // Fill land mass polygons (from osmdata pre-processed data).
@@ -752,8 +749,8 @@ if (typeof window !== 'undefined') {
 
       if (!roadsReady) return;
 
-      // Always build the roads layer from lines.
-      buildRoadsLayer(roadsCtx, window.innerWidth, window.innerHeight);
+      // Rebuild static background now that roads are available.
+      rebuildStaticBg();
 
       // If we didn't get a cached road graph, build one from the lines (with oneway metadata).
       if (!roadGraphReady) {
@@ -816,7 +813,6 @@ if (typeof window !== 'undefined') {
 
   function buildRoadsLayer(rctx, w, h) {
     if (!roadsLinesMeta.length) return;
-    rctx.clearRect(0, 0, w, h);
     rctx.save();
     rctx.strokeStyle = THEME.osmRoad;
     rctx.lineWidth = 1.0;
@@ -1056,18 +1052,10 @@ if (typeof window !== 'undefined') {
     const w = window.innerWidth;
     const h = window.innerHeight;
 
-    // Static background.
+    // Static background (gradient + terrain + roads pre-composited).
     ctx.globalCompositeOperation = 'source-over';
     ctx.globalAlpha = 1;
-    ctx.drawImage(bg, 0, 0, w, h);
-
-    if (showTerrain && landReady) {
-      ctx.drawImage(landLayer, 0, 0, w, h);
-    }
-
-    if (showRoads && roadsReady) {
-      ctx.drawImage(roadsLayer, 0, 0, w, h);
-    }
+    ctx.drawImage(staticBg, 0, 0, w, h);
 
     // Film grain.
     if (noisePattern) {
@@ -1227,6 +1215,10 @@ if (typeof window !== 'undefined') {
       }
     } // end HUD throttle
 
+    // Blit completed frame to visible canvas in one
+    // operation to prevent flicker under compositors.
+    screenCtx.drawImage(frame, 0, 0, w, h);
+
     requestAnimationFrame(tick);
   }
 
@@ -1323,9 +1315,11 @@ if (typeof window !== 'undefined') {
         break;
       case 'showRoads':
         showRoads = val === 'true' || val === true;
+        rebuildStaticBg();
         break;
       case 'showTerrain':
         showTerrain = val === 'true' || val === true;
+        rebuildStaticBg();
         break;
       case 'showOpenClosed':
         CONFIG.showOpenClosed = val === 'true' || val === true ? 1 : 0;
@@ -1344,7 +1338,7 @@ if (typeof window !== 'undefined') {
       case 'roadsDetail':
         CONFIG.roadsDetail = parseInt(val, 10);
         roadsDetail = CONFIG.roadsDetail;
-        if (roadsReady) buildRoadsLayer(roadsCtx, window.innerWidth, window.innerHeight);
+        rebuildStaticBg();
         break;
     }
   };
