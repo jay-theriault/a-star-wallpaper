@@ -35,7 +35,6 @@ const CENTER_OVERRIDE =
     ? { lat: CONFIG.centerLat, lon: CONFIG.centerLon }
     : null;
 
-const MAX_RENDER_NODES_PER_SET = 3500;
 // Safety cap for pre-rendering OSM roads into an offscreen canvas.
 // With zoomed-in defaults we can afford a higher ceiling, but we still keep a cap
 // to avoid locking up weaker machines.
@@ -70,6 +69,7 @@ if (typeof window !== 'undefined') {
   const exploredLayer = document.createElement('canvas');
   const exploredCtx = exploredLayer.getContext('2d', { alpha: true });
   let exploredLayerStep = -1;
+  let exploredDrawnCount = 0;
 
   let noisePattern = null;
   let lastHudUpdate = 0;
@@ -199,6 +199,7 @@ if (typeof window !== 'undefined') {
     exploredLayer.height = physH;
     exploredCtx.scale(dpr, dpr);
     exploredLayerStep = -1;
+    exploredDrawnCount = 0;
   }
 
   let resizeTimer = null;
@@ -511,6 +512,7 @@ if (typeof window !== 'undefined') {
     lastSearchStep = null;
     exploredCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
     exploredLayerStep = -1;
+    exploredDrawnCount = 0;
     phase = 'search';
     phaseT = 0;
     lastStepAt = performance.now();
@@ -879,10 +881,12 @@ if (typeof window !== 'undefined') {
     return keyToXY(k, w, h);
   }
 
-  function renderExploredEdgesToLayer(step, w, h, budget = MAX_RENDER_NODES_PER_SET) {
+  function renderExploredEdgesToLayer(step, w, h) {
     if (!step?.closedSet || !step?.cameFrom) return;
 
-    exploredCtx.clearRect(0, 0, w, h);
+    const total = step.closedSet.size ?? 0;
+    if (total <= exploredDrawnCount) return;
+
     exploredCtx.save();
     exploredCtx.globalCompositeOperation = 'source-over';
     exploredCtx.strokeStyle = THEME.explored;
@@ -890,24 +894,15 @@ if (typeof window !== 'undefined') {
     exploredCtx.lineCap = 'round';
     exploredCtx.lineJoin = 'round';
 
-    const total = step.closedSet.size ?? 0;
-    const limit = Math.min(budget, MAX_RENDER_NODES_PER_SET);
-    const stride = total > limit ? Math.ceil(total / limit) : 1;
-    let idx = 0;
-    let drawn = 0;
-
     const useVia = isRoadGraphActive();
     const proj = useVia ? makeProjector(simBounds, w, h, CONFIG.rotation) : null;
 
+    // Skip already-drawn entries, draw only new ones.
+    let idx = 0;
     exploredCtx.beginPath();
     for (const k of step.closedSet) {
-      if (stride > 1 && idx % stride !== 0) {
-        idx += 1;
-        continue;
-      }
       idx += 1;
-      drawn += 1;
-      if (drawn > limit) break;
+      if (idx <= exploredDrawnCount) continue;
 
       const pred = step.cameFrom.get(k);
       if (pred == null) continue;
@@ -915,7 +910,6 @@ if (typeof window !== 'undefined') {
       const p1 = cellToXY(pred, w, h);
       exploredCtx.moveTo(p1.x, p1.y);
 
-      // Draw via geometry for contracted road graph edges.
       if (useVia) {
         const via = getViaGeometry(pred, k);
         if (via) {
@@ -930,6 +924,7 @@ if (typeof window !== 'undefined') {
       exploredCtx.lineTo(p2.x, p2.y);
     }
     exploredCtx.stroke();
+    exploredDrawnCount = total;
 
     exploredCtx.restore();
   }
