@@ -15,6 +15,9 @@
         overflow: hidden;
       }
       canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
         display: block;
         width: 100%;
         height: 100%;
@@ -86,7 +89,9 @@
     </style>
   </head>
   <body>
-    <canvas id="c"></canvas>
+    <canvas id="c-bg"></canvas>
+    <canvas id="c-explored"></canvas>
+    <canvas id="c-dynamic"></canvas>
     <div id="hud"></div>
     <div id="help"></div>
     <div id="controls"></div>
