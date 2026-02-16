@@ -6,25 +6,39 @@ The explored edges layer (gold segments showing A\* search progress) rendered as
 
 ![Screenshot showing blotchy explored edges](../screenshots/explored-edges-blotchy.png)
 
-## Root Cause
+## Root Causes
 
-The road graph uses **edge contraction** to simplify the network. Chains of degree-2 nodes (straight road segments between intersections) are collapsed into single edges. The removed intermediate node positions are stored in `edge.via` arrays.
+Two issues combined to produce the blotchy appearance:
 
-`renderExploredEdgesToLayer()` in `main.js` was drawing straight lines between contracted graph nodes (intersections) without using the `via` intermediate geometry:
+### 1. Stride sampling dropped most edges (primary cause)
+
+`renderExploredEdgesToLayer()` cleared and redrew the entire offscreen canvas every frame, capped at `MAX_RENDER_NODES_PER_SET` (3500) via stride sampling. On large searches with 10,000+ explored nodes, this silently dropped 60-70% of edges. Since the Set iterates in insertion order (temporal, not spatial), the dropped edges created random spatial holes across the explored area.
+
+### 2. Missing via geometry for contracted edges
+
+The road graph uses **edge contraction** — chains of degree-2 nodes between intersections are collapsed into single edges, with removed node positions stored in `edge.via` arrays. The explored edges renderer drew straight lines between contracted graph nodes without using this intermediate geometry:
 
 ```js
-// Before fix — straight line between distant intersections
+// Before — straight line between distant intersections
 const p1 = cellToXY(k, w, h);
 const p2 = cellToXY(pred, w, h);
 exploredCtx.moveTo(p1.x, p1.y);
 exploredCtx.lineTo(p2.x, p2.y);
 ```
 
-Since intersections can be far apart, each edge appeared as a short straight dash jumping across the map rather than following the road curve. The `strokePath()` function (used for the final cyan path) already handled this correctly via `getViaGeometry()`.
+Since intersections can be far apart, each edge appeared as a short straight dash jumping across the map rather than following the road curve.
 
-## Fix (commit 4106490)
+## Fix
 
-Added via geometry lookup to explored edges rendering, matching the pattern already used by `strokePath()`:
+### Incremental rendering (commit 7553b13) — eliminated the budget cap
+
+Instead of clearing and redrawing all edges every frame, the offscreen canvas now persists and only new edges are appended each frame. This removes the stride sampling entirely — every explored edge is drawn, with minimal per-frame cost since only a handful of new edges are added each step.
+
+Key change: a `exploredDrawnCount` counter tracks how many closedSet entries have been rendered. Each frame skips already-drawn entries and only draws new ones. The counter resets on simulation reset and viewport resize.
+
+### Via geometry (commit 4106490) — edges follow road curves
+
+Added `getViaGeometry()` lookup to the explored edges renderer, matching the pattern already used by `strokePath()` for the final path:
 
 ```js
 const p1 = cellToXY(pred, w, h);
@@ -45,12 +59,6 @@ exploredCtx.lineTo(p2.x, p2.y);
 ```
 
 ## If the Problem Persists
-
-If explored edges still look blotchy after this fix, check these other contributing factors:
-
-### Stride sampling drops edges at high node counts
-
-`renderExploredEdgesToLayer()` caps rendering at `MAX_RENDER_NODES_PER_SET` (3500). When `closedSet.size` exceeds this, it skips edges using a stride, creating gaps. To test: increase `MAX_RENDER_NODES_PER_SET` at the top of `main.js` (line 38) — try 10000. This trades rendering performance for visual completeness.
 
 ### Via geometry lookup direction mismatch
 
@@ -85,9 +93,9 @@ function getViaGeometry(fromId, toId) {
 
 | Location                               | Purpose                                                |
 | -------------------------------------- | ------------------------------------------------------ |
-| `main.js:renderExploredEdgesToLayer()` | Draws explored edges to offscreen canvas               |
+| `main.js:renderExploredEdgesToLayer()` | Incrementally draws explored edges to offscreen canvas |
+| `main.js:exploredDrawnCount`           | Tracks how many closedSet entries have been rendered   |
 | `main.js:getViaGeometry()`             | Looks up intermediate road points for contracted edges |
 | `main.js:strokePath()`                 | Draws final path (already had via geometry)            |
 | `road-graph.js:contractGraph()`        | Edge contraction that produces `via` arrays            |
 | `config.js:THEME.explored`             | Explored edges color/alpha                             |
-| `main.js:MAX_RENDER_NODES_PER_SET`     | Rendering budget cap (line 38)                         |
